@@ -34,8 +34,8 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   }));
 
   const prompt = `
-    Analyze the following network traffic summary derived from a PCAP file. 
-    Act as a senior cybersecurity analyst.
+    Analyze the following network traffic summary derived from a PCAP file captured during a potential security incident.
+    Act as a senior Incident Response (IR) analyst conducting post-mortem forensic analysis.
     
     Traffic Stats:
     - Total Packets: ${data.totalPackets}
@@ -46,12 +46,13 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     Packet Payloads (Sample):
     ${JSON.stringify(packetPayloadSample)}
     
-    Identify potential threats, anomalies, or indicators of compromise (IOCs).
-    Look for:
-    - Cleartext protocols (Telnet, FTP, HTTP) containing credentials or commands.
-    - Suspicious high ports or non-standard port usage.
-    - Lateral movement patterns or scanning behavior.
-    - Keywords in payloads like 'cmd', 'sh', 'powershell', 'GET /etc/passwd', 'User-Agent: sqlmap', etc.
+    Your objective is to derive high-value security insights and reconstruct the narrative, not just flag data.
+    
+    Focus your analysis on:
+    1. **Incident Reconstruction**: Infer the sequence of events (e.g., Reconnaissance -> Lateral Movement -> Exfiltration).
+    2. **Intent & Attribution**: What is the likely intent (e.g., C2, credential harvesting, internal recon)? Are there patterns matching known tools?
+    3. **Anomalous Behaviors**: Identify non-standard port usage, cleartext data leaks relative to the protocol, or suspicious beacons.
+    4. **False Positive Evaluation**: Distinguish between likely malicious activity and potential benign administrative tasks.
     
     Return a structured JSON assessment.
   `;
@@ -60,7 +61,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     type: Type.OBJECT,
     properties: {
       riskScore: { type: Type.INTEGER, description: "Risk score from 0 (safe) to 100 (critical)" },
-      summary: { type: Type.STRING, description: "Executive summary of the traffic analysis, referencing specific payloads if relevant." },
+      summary: { type: Type.STRING, description: "Executive summary focusing on the incident narrative, intent, and overall security posture." },
       iocs: {
         type: Type.ARRAY,
         items: {
@@ -68,7 +69,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
           properties: {
             value: { type: Type.STRING, description: "The IP, Port, or Protocol" },
             type: { type: Type.STRING, enum: ['IP', 'PORT', 'PATTERN'] },
-            description: { type: Type.STRING, description: "Why this is suspicious" },
+            description: { type: Type.STRING, description: "Forensic context on why this is an indicator of compromise" },
             severity: { type: Type.STRING, enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] }
           }
         }
@@ -88,7 +89,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.1, // Low temp for analytical precision
+        temperature: 0.2, // Slightly increased to allow for interpretive reasoning
       }
     });
 
