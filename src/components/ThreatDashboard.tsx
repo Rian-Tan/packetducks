@@ -127,24 +127,24 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
         </div>
       </div>
 
-      {/* Recommendations */}
+      {/* Actionable Recommendations */}
       <div className="bg-cyber-800 border border-cyber-700 rounded-xl p-6">
         <h3 className="text-lg font-semibold flex items-center gap-2 mb-4">
           <CheckCircle className="text-cyber-success" size={20} />
-          Remediation Steps
+          Actionable Recommendations
         </h3>
-        <ul className="space-y-2">
+        <ul className="space-y-3">
           {data.recommendations.map((rec, i) => (
-            <li
-              key={i}
-              className="flex items-start gap-3 text-sm text-gray-300"
-            >
-              <span className="text-cyber-success mt-1">•</span>
-              {rec}
+            <li key={i} className="flex items-start gap-3 text-sm text-gray-200 bg-cyber-900/50 p-3 rounded-lg border-l-2 border-cyber-success">
+              <div className="mt-1 flex-shrink-0">
+                <CheckCircle className="text-cyber-success" size={16}/>
+              </div>
+              <span className="font-mono">{rec}</span>
             </li>
           ))}
         </ul>
       </div>
+
     </div>
   );
 };

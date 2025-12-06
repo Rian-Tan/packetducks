@@ -163,6 +163,37 @@ const ReportGenerator: React.FC<ReportGeneratorProps> = ({
       }
       addPageIfNeeded();
 
+      // --- Actionable Recommendations ---
+      if (threatIntel.recommendations.length > 0) {
+        currentY += 10;
+        pdf.setFontSize(18);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setTextColor(55, 65, 81);
+        pdf.text('Actionable Recommendations', margin, currentY);
+        currentY += 10;
+
+        threatIntel.recommendations.forEach((rec, index) => {
+          const recLines = pdf.splitTextToSize(rec, pageWidth - margin * 2 - 10); // Indent text
+          const recBlockHeight = (recLines.length * 5) + 8;
+
+          if (currentY + recBlockHeight > pageHeight - footerHeight) {
+            pdf.addPage();
+            currentY = margin;
+          }
+          
+          pdf.setFontSize(14);
+          pdf.setTextColor(31, 41, 55);
+          pdf.text(`${index + 1}.`, margin, currentY);
+
+          pdf.setFontSize(11);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setTextColor(80, 80, 80);
+          pdf.text(recLines, margin + 8, currentY);
+          currentY += recBlockHeight;
+        });
+      }
+      addPageIfNeeded();
+
       // --- Protocol Distribution Section ---
       currentY += 10;
       pdf.setFontSize(18);
