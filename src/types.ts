@@ -14,6 +14,7 @@ export interface PacketSummary {
   dstPort?: number;
   length: number;
   flags?: number; // TCP flags
+  payload?: string; // ASCII representation of packet body
 }
 
 export interface PortUsage {

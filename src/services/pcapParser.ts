@@ -1,4 +1,3 @@
-
 import { PacketSummary, PcapAnalysisResult, PortUsage, ProtocolType } from '../types';
 import { COMMON_PORTS, TCP_FLAGS } from '../constants';
 
@@ -13,6 +12,19 @@ const formatIPv6 = (view: DataView, offset: number): string => {
     parts.push(view.getUint16(offset + (i * 2), false).toString(16));
   }
   return parts.join(':');
+};
+
+// Helper to extract printable ASCII from payload
+const getPayloadASCII = (view: DataView, start: number, end: number, maxLength: number = 200): string => {
+  if (start >= end) return '';
+  const len = Math.min(end - start, maxLength);
+  let str = '';
+  for (let i = 0; i < len; i++) {
+    const c = view.getUint8(start + i);
+    // Printable ASCII: 32 (space) to 126 (~)
+    str += (c >= 32 && c <= 126) ? String.fromCharCode(c) : '.';
+  }
+  return str;
 };
 
 export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
@@ -227,13 +239,19 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           
           // TCP Data Offset (Header Length)
           const dataOffsetByte = view.getUint8(l4Offset + 12);
-          // const dataOffset = (dataOffsetByte >> 4) * 4; // Unused for basic stats
+          const dataOffset = (dataOffsetByte >> 4) * 4; 
 
           const flags = view.getUint8(l4Offset + 13);
 
           pSummary.srcPort = srcPort;
           pSummary.dstPort = dstPort;
           pSummary.flags = flags;
+
+          // Payload Extraction
+          const payloadStart = l4Offset + dataOffset;
+          if (payloadStart < packetEnd) {
+            pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
+          }
 
           // Stats tracking
           initUsage(tcpUsage, srcPort);
@@ -267,6 +285,12 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
 
           pSummary.srcPort = srcPort;
           pSummary.dstPort = dstPort;
+
+          // Payload Extraction (UDP header is 8 bytes)
+          const payloadStart = l4Offset + 8;
+          if (payloadStart < packetEnd) {
+            pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
+          }
 
           initUsage(udpUsage, srcPort);
           initUsage(udpUsage, dstPort);

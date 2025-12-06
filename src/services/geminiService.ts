@@ -20,6 +20,19 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   const connectionSample = data.connections.slice(0, 30);
   const hostsSample = data.uniqueHosts.slice(0, 50);
 
+  // Filter for packets that have payload data
+  const packetsWithPayload = data.rawSummary
+    .filter(p => p.payload && p.payload.length > 2) // >2 to ignore simple CRLFs or empties
+    .slice(0, 50); // Sample first 50 packets with payloads
+
+  const packetPayloadSample = packetsWithPayload.map(p => ({
+    src: p.srcIp,
+    dst: p.dstIp,
+    proto: p.protocol,
+    dstPort: p.dstPort,
+    payloadSnippet: p.payload
+  }));
+
   const prompt = `
     Analyze the following network traffic summary derived from a PCAP file. 
     Act as a senior cybersecurity analyst.
@@ -30,12 +43,15 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     - Unique Hosts Sample: ${JSON.stringify(hostsSample)}
     - Connections Sample: ${JSON.stringify(connectionSample)}
     
+    Packet Payloads (Sample):
+    ${JSON.stringify(packetPayloadSample)}
+    
     Identify potential threats, anomalies, or indicators of compromise (IOCs).
     Look for:
-    - Cleartext protocols (Telnet, FTP, HTTP)
-    - Suspicious high ports
-    - Lateral movement patterns
-    - Known bad IP ranges (if recognized)
+    - Cleartext protocols (Telnet, FTP, HTTP) containing credentials or commands.
+    - Suspicious high ports or non-standard port usage.
+    - Lateral movement patterns or scanning behavior.
+    - Keywords in payloads like 'cmd', 'sh', 'powershell', 'GET /etc/passwd', 'User-Agent: sqlmap', etc.
     
     Return a structured JSON assessment.
   `;
@@ -44,7 +60,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     type: Type.OBJECT,
     properties: {
       riskScore: { type: Type.INTEGER, description: "Risk score from 0 (safe) to 100 (critical)" },
-      summary: { type: Type.STRING, description: "Executive summary of the traffic analysis" },
+      summary: { type: Type.STRING, description: "Executive summary of the traffic analysis, referencing specific payloads if relevant." },
       iocs: {
         type: Type.ARRAY,
         items: {
