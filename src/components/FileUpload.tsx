@@ -44,7 +44,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFileSelect, isProcessi
 
           <div className="flex items-center gap-2 text-xs text-cyber-500 bg-cyber-900/50 px-3 py-1 rounded-full border border-cyber-700/50">
             <AlertCircle size={12} />
-            <span>Client-side processing only. No data leaves your browser until AI analysis.</span>
+            <span>Files uploaded are processed in memory.</span>
           </div>
         </div>
       </div>

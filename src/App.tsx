@@ -6,7 +6,7 @@ import { TimelineView } from './components/TimelineView';
 import { parsePcap } from './services/pcapParser';
 import { generateThreatIntel } from './services/geminiService';
 import { PcapAnalysisResult, ThreatIntel } from './types';
-import { Shield, Network, Activity, FileDigit } from 'lucide-react';
+import { Shield, Network, Activity, FileDigit, Globe } from 'lucide-react';
 
 const App: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
@@ -49,6 +49,34 @@ const App: React.FC = () => {
       setIsProcessing(false);
       setIsAiLoading(false);
     }
+  };
+
+  const getHostStyle = (ip: string) => {
+    if (ip.includes(':')) return 'bg-indigo-500/20 border-indigo-500/40 text-indigo-200'; // IPv6
+  
+    const parts = ip.split('.').map(n => parseInt(n, 10));
+    if (parts.length !== 4) return 'bg-gray-500/20 border-gray-500/40 text-gray-300';
+  
+    // Private ranges
+    // 10.0.0.0 - 10.255.255.255
+    // 172.16.0.0 - 172.31.255.255
+    // 192.168.0.0 - 192.168.255.255
+    if (
+      parts[0] === 10 ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+      (parts[0] === 192 && parts[1] === 168)
+    ) {
+      return 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'; // Private (Internal)
+    }
+  
+    // Loopback
+    if (parts[0] === 127) return 'bg-slate-500/20 border-slate-500/40 text-slate-400';
+  
+    // Multicast
+    if (parts[0] >= 224 && parts[0] <= 239) return 'bg-purple-500/20 border-purple-500/40 text-purple-300';
+  
+    // Public (Default)
+    return 'bg-sky-500/20 border-sky-500/40 text-sky-300';
   };
 
   return (
@@ -166,26 +194,36 @@ const App: React.FC = () => {
                       )}
                     </div>
                  </section>
+
+                 {/* Detected Hosts (Moved Here) */}
+                 <section className="bg-cyber-800 border border-cyber-700 rounded-xl p-6">
+                    <div className="flex flex-wrap items-center justify-between mb-4 gap-4">
+                        <h3 className="text-lg font-semibold flex items-center gap-2">
+                          <Globe size={20} className="text-cyber-400" />
+                          Detected Hosts
+                        </h3>
+                        <div className="flex items-center gap-3 text-xs font-mono">
+                            <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]"></span>Private</span>
+                            <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)]"></span>Public</span>
+                            <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.5)]"></span>Multicast</span>
+                        </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 max-h-60 overflow-y-auto custom-scrollbar p-1">
+                      {analysis.uniqueHosts.map(host => (
+                        <span 
+                          key={host} 
+                          className={`px-2.5 py-1 border rounded text-xs font-mono transition-colors cursor-default ${getHostStyle(host)}`}
+                        >
+                          {host}
+                        </span>
+                      ))}
+                    </div>
+                 </section>
               </div>
 
               {/* Right Col: Threat Intel */}
               <div className="space-y-8">
                  <ThreatDashboard data={threatIntel} loading={isAiLoading} />
-                 
-                 {/* Host List (Mini) */}
-                 <section className="bg-cyber-800 border border-cyber-700 rounded-xl p-6">
-                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Detected Hosts</h3>
-                    <div className="flex flex-wrap gap-2">
-                      {analysis.uniqueHosts.slice(0, 40).map(host => (
-                        <span key={host} className="px-2 py-1 bg-cyber-900 border border-cyber-700 rounded text-xs font-mono text-cyber-400 hover:border-cyber-400 cursor-default transition-colors">
-                          {host}
-                        </span>
-                      ))}
-                      {analysis.uniqueHosts.length > 40 && (
-                        <span className="px-2 py-1 text-xs text-gray-500">+{analysis.uniqueHosts.length - 40} more</span>
-                      )}
-                    </div>
-                 </section>
               </div>
             </div>
             
