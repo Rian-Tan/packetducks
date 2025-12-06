@@ -38,29 +38,31 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
 
   const magicNumber = view.getUint32(0, true); // Read first 4 bytes as Little Endian for checking
   let littleEndian = true;
-  let timePrecisionMultiplier = 1; // Default to microseconds
+  let timePrecisionMultiplier = 1000; // Default to microseconds (1000000ns / 1000 = 1ms) -> Divider for ms conversion
 
   /**
    * Magic Number Logic:
-   * Standard PCAP Magic: 0xa1b2c3d4
+   * Standard PCAP Magic: 0xa1b2c3d4 (Microseconds)
    *
    * If we read it as LE and get 0xa1b2c3d4, the file IS Little Endian.
    * If we read it as LE and get 0xd4c3b2a1, the file IS Big Endian (bytes are swapped).
    */
   if (magicNumber === 0xa1b2c3d4) {
     littleEndian = true;
+    timePrecisionMultiplier = 1000;
   } else if (magicNumber === 0xd4c3b2a1) {
     littleEndian = false;
+    timePrecisionMultiplier = 1000;
   } else if (magicNumber === 0xa1b23c4d) {
     littleEndian = true; // Nano LE
-    timePrecisionMultiplier = 1000;
+    timePrecisionMultiplier = 1000000;
   } else if (magicNumber === 0x4d3cb2a1) {
     littleEndian = false; // Nano BE
-    timePrecisionMultiplier = 1000;
+    timePrecisionMultiplier = 1000000;
   } else if (magicNumber === 0x0A0D0D0A) {
     throw new Error("PCAPNG format detected. Please convert to standard PCAP (Libpcap) format using Wireshark, editcap, or tcpdump.");
   } else {
-    console.warn(`Unknown magic number 0x${magicNumber.toString(16)}, assuming Little Endian.`);
+    console.warn(`Unknown magic number 0x${magicNumber.toString(16)}, assuming Little Endian Microseconds.`);
     littleEndian = true;
   }
 
@@ -92,9 +94,16 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     if (offset + 16 > view.byteLength) break;
 
     // Header: ts_sec (4), ts_usec (4), incl_len (4), orig_len (4)
+    const tsSec = view.getUint32(offset, littleEndian);
+    const tsUsec = view.getUint32(offset + 4, littleEndian);
     const inclLen = view.getUint32(offset + 8, littleEndian);
     // const origLen = view.getUint32(offset + 12, littleEndian);
     
+    // Calculate timestamp in milliseconds
+    // tsSec is seconds since epoch. tsUsec is micro/nanoseconds.
+    // We want JS Date (milliseconds).
+    const timestamp = (tsSec * 1000) + Math.floor(tsUsec / (timePrecisionMultiplier / 1000));
+
     offset += 16; // Move past packet header
 
     if (offset + inclLen > view.byteLength) {
@@ -221,7 +230,7 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
 
     // Layer 4: Transport Layer
     let pSummary: PacketSummary = {
-      timestamp: Date.now(),
+      timestamp: timestamp,
       srcIp: srcIp || '?',
       dstIp: dstIp || '?',
       protocol: ProtocolType.Other,
@@ -359,6 +368,12 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }
   });
 
+  // Sort packets by timestamp just in case
+  packets.sort((a, b) => a.timestamp - b.timestamp);
+
+  const startTime = packets.length > 0 ? new Date(packets[0].timestamp) : new Date();
+  const endTime = packets.length > 0 ? new Date(packets[packets.length - 1].timestamp) : new Date();
+
   return {
     totalPackets: packets.length,
     protocolCounts,
@@ -367,8 +382,8 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
       const [a, b] = c.split(' <-> ');
       return { a, b };
     }),
-    startTime: new Date(), // Placeholder
-    endTime: new Date(),   // Placeholder
+    startTime,
+    endTime,
     rawSummary: packets
   };
 };

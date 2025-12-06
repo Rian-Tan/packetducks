@@ -1,8 +1,8 @@
-
 import React, { useState } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { ProtocolChart } from './components/ProtocolChart';
 import { ThreatDashboard } from './components/ThreatDashboard';
+import { TimelineView } from './components/TimelineView';
 import { parsePcap } from './services/pcapParser';
 import { generateThreatIntel } from './services/geminiService';
 import { PcapAnalysisResult, ThreatIntel } from './types';
@@ -106,8 +106,10 @@ const App: React.FC = () => {
                 <p className="text-2xl font-mono font-bold text-cyber-accent">{analysis.connections.length}</p>
               </div>
               <div className="bg-cyber-800 p-6 rounded-xl border border-cyber-700">
-                <p className="text-sm text-gray-400 mb-1">Protocols Identified</p>
-                <p className="text-2xl font-mono font-bold text-white">{Object.keys(analysis.protocolCounts).length}</p>
+                <p className="text-sm text-gray-400 mb-1">Duration</p>
+                <p className="text-2xl font-mono font-bold text-white">
+                  {((analysis.endTime.getTime() - analysis.startTime.getTime()) / 1000).toFixed(2)}s
+                </p>
               </div>
             </div>
 
@@ -115,7 +117,7 @@ const App: React.FC = () => {
               {/* Left Col: Charts & Stats */}
               <div className="lg:col-span-2 space-y-8">
                  {/* Protocol Distribution */}
-                 <section className="bg-cyber-800 border border-cyber-700 rounded-xl p-6">
+                 <section className="bg-cyber-800HP border border-cyber-700 rounded-xl p-6">
                     <div className="flex items-center justify-between mb-6">
                       <h3 className="text-lg font-semibold flex items-center gap-2">
                         <Network size={20} className="text-cyber-500" />
@@ -123,6 +125,11 @@ const App: React.FC = () => {
                       </h3>
                     </div>
                     <ProtocolChart data={analysis.protocolCounts} />
+                 </section>
+
+                 {/* Timeline View */}
+                 <section>
+                    <TimelineView analysis={analysis} threatIntel={threatIntel} />
                  </section>
 
                  {/* Connection Table */}
