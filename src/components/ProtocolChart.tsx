@@ -1,6 +1,5 @@
-
 import React from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList } from 'recharts';
 
 interface ProtocolChartProps {
   data: Record<string, number>;
@@ -34,12 +33,20 @@ export const ProtocolChart: React.FC<ProtocolChartProps> = ({ data }) => {
           <Tooltip 
             contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', color: '#f1f5f9' }}
             cursor={{fill: '#334155', opacity: 0.4}}
+            itemStyle={{ color: '#e2e8f0' }}
           />
           <Bar dataKey="count" radius={[0, 4, 4, 0]}>
             {chartData.map((entry, index) => (
               <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />
             ))}
-          </Bar>
+            <LabelList 
+              dataKey="count" 
+              position="right" 
+              fill="#f1f5f9" 
+              fontSize={12}
+              offset={4}
+            />
+        </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>
