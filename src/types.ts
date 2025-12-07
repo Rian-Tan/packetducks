@@ -6,6 +6,7 @@ export enum ProtocolType {
 }
 
 export interface PacketSummary {
+  frameNumber: number; // Original Wireshark Frame Number (1-based)
   timestamp: number;
   srcIp: string;
   dstIp: string;
@@ -42,6 +43,7 @@ export interface ThreatIntel {
     type: 'IP' | 'PORT' | 'PATTERN';
     description: string;
     severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    virusTotalDetections?: string;
   }[];
   recommendations: string[];
 }

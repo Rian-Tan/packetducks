@@ -17,7 +17,11 @@ import {
   Eye,
   Radar,
   FileCode,
-  Layers
+  Layers,
+  Star,
+  X,
+  Hash,
+  FileText
 } from 'lucide-react';
 import { COMMON_PORTS } from '../constants';
 
@@ -38,13 +42,17 @@ interface TimelineEvent {
   relatedEventId?: string; // Links this event to a previous one (e.g. Pivot source)
   contextId?: string; // ID to group related events visually
   count?: number; // For deduplication
+  frameNumber?: number; // Wireshark Frame Number (1-based)
 }
 
-type FilterType = 'ALL' | 'IOC' | 'AUTH' | 'WEB' | 'NEW_CONN' | 'BURST' | 'CONTEXT' | 'SCAN';
+type FilterType = 'ALL' | 'IOC' | 'AUTH' | 'WEB' | 'NEW_CONN' | 'BURST' | 'CONTEXT' | 'SCAN' | 'BOOKMARKS';
 
 export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatIntel }) => {
   const [activeFilter, setActiveFilter] = useState<FilterType>('ALL');
   const [currentPage, setCurrentPage] = useState(0);
+  const [bookmarks, setBookmarks] = useState<Set<string>>(new Set());
+  const [selectedEvent, setSelectedEvent] = useState<TimelineEvent | null>(null);
+  
   const EVENTS_PER_PAGE = 100;
 
   const events = useMemo(() => {
@@ -70,11 +78,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
     // Bad User Agents
     const badUzARgx = /User-Agent:\s*(sqlmap|nikto|nmap|curl|python-requests|gobuster|hydra)/i;
 
-    // Static Assets Regex (to ignore for Web Attacks)
+    //ZU: Static Assets Regex (to ignore for Web Attacks)
     const staticAssetRgx = /\.(css|js|map|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)(\?|$)/i;
 
     // Benign HTML/CSS Content Regex (To prevent false positives on Response bodies)
-    // Matches </style>, </div>, or CSS patterns like {background:...}
     const safeHtmlRgx = /(<\/(style|script|div|body|html)>|\{\s*[a-zA-Z-]+\s*:\s*#[a-fA-F0-9]+\s*\})/i;
 
     // --- State Tracking ---
@@ -91,12 +98,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
       const offsetSec = (offsetMs / 1000).toFixed(2);
       const connKey = [p.srcIp, p.dstIp].sort().join('-');
       const burstKey = `${p.srcIp}->${p.dstIp}`; // Directional for burst
+      const frameNum = p.frameNumber; // Use the original frame number from parsing
 
       let evt: Partial<TimelineEvent> = {
         id: `${p.timestamp}-${idx}`,
         timestamp: p.timestamp,
         offset: `+${offsetSec}s`,
-        packet: p
+        packet: p,
+        frameNumber: frameNum
       };
 
       // --- 1. Burst Logic ---
@@ -114,6 +123,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
                summary: 'High Traffic Burst',
                detail: `${currentBurst.count} packets sent ${currentBurst.src} → ${currentBurst.dst} in <1s`,
                severity: 'warning'
+               // No single frame number for a burst
              });
           }
           // Start new potential burst
@@ -137,7 +147,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
                type: 'SCAN',
                summary: 'Port Scanning Detected',
                detail: `Host ${p.srcIp} has accessed >${SCAN_THRESHOLD} unique ports.`,
-               severity: 'warning'
+               severity: 'warning',
+               frameNumber: frameNum // Associate with the packet that tripped the threshold
              });
         }
       }
@@ -163,7 +174,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
       // --- 4. Heuristic Content Analysis ---
       if (p.payload) {
         // Skip heuristic checks for static assets (CSS, JS, Images, etc.) or HTTP Responses
-        // HTTP Responses (starts with HTTP/) contain valid HTML/JS/CSS that triggers false positive attacks.
         const isHttpResponse = p.payload.startsWith('HTTP/') || p.payload.includes('HTTP/1.1 200');
         const isStaticAsset = staticAssetRgx.test(p.payload);
         const isSafeHtml = safeHtmlRgx.test(p.payload);
@@ -272,7 +282,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
     });
 
     // --- Pass 3: Deduplication ---
-    // Group consecutive identical events
     if (linkedEvents.length === 0) return [];
     
     const deduplicatedEvents: TimelineEvent[] = [];
@@ -289,7 +298,6 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
 
       if (isSame) {
         lastEvent.count = (lastEvent.count || 1) + 1;
-        // Optionally update timestamp to show the range, but keeping start time is standard for timeline
       } else {
         deduplicatedEvents.push(lastEvent);
         lastEvent = { ...current, count: 1 };
@@ -300,12 +308,23 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
     return deduplicatedEvents;
   }, [analysis, threatIntel]);
 
+  const toggleBookmark = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setBookmarks(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const filteredEvents = useMemo(() => {
+    if (activeFilter === 'BOOKMARKS') return events.filter(e => bookmarks.has(e.id));
     if (activeFilter === 'ALL') return events;
     if (activeFilter === 'CONTEXT') return events.filter(e => e.relatedEventId || e.type === 'PIVOT');
     if (activeFilter === 'WEB') return events.filter(e => e.type === 'WEB_ATTACK' || e.type === 'DNS_TUNNEL');
     return events.filter(e => e.type === activeFilter);
-  }, [events, activeFilter]);
+  }, [events, activeFilter, bookmarks]);
 
   const totalPages = Math.ceil(filteredEvents.length / EVENTS_PER_PAGE);
   const currentEvents = filteredEvents.slice(currentPage * EVENTS_PER_PAGE, (currentPage + 1) * EVENTS_PER_PAGE);
@@ -350,140 +369,271 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ analysis, threatInte
   }
 
   return (
-    <div className="bg-cyber-800 border border-cyber-700 rounded-xl overflow-hidden flex flex-col h-[600px]">
-      <div className="px-6 py-4 border-b border-cyber-700 bg-cyber-900/50 flex flex-col gap-4">
-        <div className="flex justify-between items-center">
-            <h3 className="text-lg font-semibold flex items-center gap-2 text-gray-100">
-            <Clock size={20} className="text-cyber-400" />
-            Event Timeline
-            </h3>
-            <span className="text-xs text-gray-500 font-mono bg-cyber-900 px-2 py-1 rounded border border-cyber-700">
-            {filteredEvents.length} events (collapsed)
-            </span>
+    <>
+      <div className="bg-cyber-800 border border-cyber-700 rounded-xl overflow-hidden flex flex-col h-[600px]">
+        <div className="px-6 py-4 border-b border-cyber-700 bg-cyber-900/50 flex flex-col gap-4">
+          <div className="flex justify-between items-center">
+              <h3 className="text-lg font-semibold flex items-center gap-2 text-gray-100">
+              <Clock size={20} className="text-cyber-400" />
+              Event Timeline
+              </h3>
+              <span className="text-xs text-gray-500 font-mono bg-cyber-900 px-2 py-1 rounded border border-cyber-700">
+              {filteredEvents.length} events
+              </span>
+          </div>
+          
+          {/* Filters */}
+          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+              {(['ALL', 'IOC', 'WEB', 'SCAN', 'BURST', 'CONTEXT', 'AUTH', 'NEW_CONN', 'BOOKMARKS'] as FilterType[]).map((f) => (
+                  <button
+                      key={f}
+                      onClick={() => { setActiveFilter(f); setCurrentPage(0); }}
+                      className={`px-3 py-1 text-xs font-medium rounded-fullSz border transition-colors whitespace-nowrap flex items-center gap-1 ${
+                          activeFilter === f 
+                          ? 'bg-cyber-500 text-white border-cyber-400' 
+                          : 'bg-cyber-900 text-gray-400 border-cyber-700 hover:border-cyber-500'
+                      }`}
+                  >
+                      {f === 'ALL' && <Layers size={12}/>}
+                      {f === 'IOC' && <ShieldAlert size={12}/>}
+                      {f === 'AUTH' && <Key size={12}/>}
+                      {f === 'NEW_CONN' && <Network size={12}/>}
+                      {f === 'BURST' && <Zap size={12}/>}
+                      {f === 'CONTEXT' && <Link2 size={12}/>}
+                      {f === 'WEB' && <Terminal size={12}/>}
+                      {f === 'SCAN' && <Radar size={12}/>}
+                      {f === 'BOOKMARKS' && <Star size={12} className={activeFilter === 'BOOKMARKS' ? 'fill-white' : ''} />}
+                      {f === 'ALL' ? 'All Events' : f === 'NEW_CONN' ? 'Connections' : f === 'AUTH' ? 'Auth' : f === 'CONTEXT' ? 'Linked Context' : f === 'WEB' ? 'Web/DNS' : f === 'BOOKMARKS' ? 'Bookmarks' : f}
+                  </button>
+              ))}
+          </div>
         </div>
         
-        {/* Filters */}
-        <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-            {(['ALL', 'IOC', 'WEB', 'SCAN', 'BURST', 'CONTEXT', 'AUTH', 'NEW_CONN'] as FilterType[]).map((f) => (
-                <button
-                    key={f}
-                    onClick={() => { setActiveFilter(f); setCurrentPage(0); }}
-                    className={`px-3 py-1 text-xs font-medium rounded-full border transition-colors whitespace-nowrap flex items-center gap-1 ${
-                        activeFilter === f 
-                        ? 'bg-cyber-500 text-white border-cyber-400' 
-                        : 'bg-cyber-900 text-gray-400 border-cyber-700 hover:border-cyber-500'
-                    }`}
-                >
-                    {f === 'ALL' && <Layers size={12}/>}
-                    {f === 'IOC' && <ShieldAlert size={12}/>}
-                    {f === 'AUTH' && <Key size={12}/>}
-                    {f === 'NEW_CONN' && <Network size={12}/>}
-                    {f === 'BURST' && <Zap size={12}/>}
-                    {f === 'CONTEXT' && <Link2 size={12}/>}
-                    {f === 'WEB' && <Terminal size={12}/>}
-                    {f === 'SCAN' && <Radar size={12}/>}
-                    {f === 'ALL' ? 'All Events' : f === 'NEW_CONN' ? 'Connections' : f === 'AUTH' ? 'Auth' : f === 'CONTEXT' ? 'Linked Context' : f === 'WEB' ? 'Web/DNS' : f}
-                </button>
-            ))}
-        </div>
-      </div>
-      
-      {/* Scrollable Container */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar relative">
-        {/* Inner Wrapper - Ensures full height for the line. No padding here to simplify absolute positioning relative to edge */}
-        <div className="relative min-h-full py-6">
-            
-            {/* Main Vertical Line - Positioned 32px (left-8) from left edge */}
-            <div className="absolute left-8 top-8 bottom-0 w-px bg-cyber-700"></div>
+        {/* Scrollable Container */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar relative">
+          <div className="relative min-h-full py-6">
+              
+              {/* Main Vertical Line */}
+              <div className="absolute left-8 top-8 bottom-0 w-px bg-cyber-700"></div>
 
-            <div className="space-y-6">
-            {currentEvents.map((evt) => {
-                const isContextLinked = !!evt.relatedEventId;
-                const count = evt.count || 1;
+              <div className="space-y-6">
+              {currentEvents.map((evt) => {
+                  const isContextLinked = !!evt.relatedEventId;
+                  const count = evt.count || 1;
+                  const isBookmarked = bookmarks.has(evt.id);
 
-                return (
-                <div key={evt.id} className="relative group animate-fade-in">
-                    
-                    {/* The Dot - Positioned 32px (left-8) from left edge to match line. Center it with -translate-x-1/2 */}
-                    <div className={`absolute left-8 top-3 -translate-x-1/2 w-3 h-3 rounded-full border-2 border-cyber-800 z-10 shadow-sm transition-transform group-hover:scale-125 ${
-                        evt.severity === 'critical' ? 'bg-red-500' : 
-                        evt.severity === 'warning' ? 'bg-orange-400' : 
-                        evt.severity === 'info' ? 'bg-blue-500' :
-                        isContextLinked ? 'bg-cyber-accent' : 'bg-cyber-600'
-                    }`}></div>
+                  return (
+                  <div key={evt.id} className="relative group animate-fade-in">
+                      
+                      {/* The Dot */}
+                      <div className={`absolute left-8 top-3 -translate-x-1/2 w-3 h-3 rounded-full border-2 border-cyber-800 z-10 shadow-sm transition-transform group-hover:scale-125 ${
+                          evt.severity === 'critical' ? 'bg-red-500' : 
+                          evt.severity === 'warning' ? 'bg-orange-400' : 
+                          evt.severity === 'info' ? 'bg-blue-500' :
+                          isContextLinked ? 'bg-cyber-accent' : 'bg-cyber-600'
+                      }`}></div>
 
-                    <div className="pl-16 pr-4"> {/* Content padding to clear the dot/line */}
-                        <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4">
-                            {/* Timestamp */}
-                            <div className="shrink-0 w-16 pt-1">
-                                <span className="text-xs font-mono text-gray-500">{evt.offset}</span>
-                            </div>
+                      <div className="pl-16 pr-4">
+                          <div className="flex flex-col sm:flex-row sm:items-start gap-2 sm:gap-4">
+                              {/* Timestamp & ID */}
+                              <div className="shrink-0 w-24 pt-1 flex flex-col items-start gap-1">
+                                  <span className="text-xs font-mono text-gray-500">{evt.offset}</span>
+                                  {evt.frameNumber && (
+                                    <span className="text-[10px] font-mono text-cyber-500 select-all border border-cyber-800 bg-cyber-900/50 px-1 rounded">#{evt.frameNumber}</span>
+                                  )}
+                              </div>
 
-                            {/* Content Card */}
-                            <div className={`flex-1 p-3 rounded-lg border text-sm transition-all hover:bg-cyber-700/30 ${getColor(evt.severity, isContextLinked)}`}>
-                                <div className="flex items-center justify-between mb-1">
-                                    <div className="flex items-center gap-2 font-semibold">
-                                        {getIcon(evt.type)}
-                                        <span>{evt.summary}</span>
-                                        {count > 1 && (
-                                            <span className="ml-2 text-xs bg-cyber-900/60 text-cyber-300 px-2 py-0.5 rounded-full border border-cyber-700/50 font-mono">
-                                                x{count}
-                                            </span>
+                              {/* Content Card */}
+                              <div 
+                                onClick={() => setSelectedEvent(evt)}
+                                className={`flex-1 p-3 rounded-lg border text-sm transition-all hover:bg-cyber-700/50 cursor-pointer relative group/card ${getColor(evt.severity, isContextLinked)}`}
+                              >
+                                  <div className="flex items-center justify-between mb-1">
+                                      <div className="flex items-center gap-2 font-semibold">
+                                          {getIcon(evt.type)}
+                                          <span>{evt.summary}</span>
+                                          {count > 1 && (
+                                              <span className="ml-2 text-xs bg-cyber-900/60 text-cyber-300 px-2 py-0.5 rounded-full border border-cyber-700/50 font-mono">
+                                                  x{count}
+                                              </span>
+                                          )}
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        {isContextLinked && (
+                                            <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-cyber-accent bg-cyber-accent/10 px-2 py-0.5 rounded border border-cyber-accent/20">
+                                                <Link2 size={10} />
+                                                Context Linked
+                                            </div>
                                         )}
-                                    </div>
-                                    {isContextLinked && (
-                                        <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-cyber-accent bg-cyber-accent/10 px-2 py-0.5 rounded border border-cyber-accent/20">
-                                            <Link2 size={10} />
-                                            Context Linked
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="text-xs opacity-80 font-mono break-all">
-                                    {evt.detail}
-                                </div>
-                                {evt.packet?.payload && (
-                                    <div className="mt-2 pt-2 border-t border-white/10 text-xs font-mono text-gray-400 truncate opacity-60">
-                                        Payload: {evt.packet.payload.substring(0, 60)}...
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )})}
-            
-            {currentEvents.length === 0 && (
-                <div className="text-center text-gray-500 py-10 italic">
-                    No events match this filter.
-                </div>
-            )}
-            </div>
+                                        <button
+                                          onClick={(e) => toggleBookmark(e, evt.id)}
+                                          className={`p-1 rounded hover:bg-cyber-900/50 transition-colors ${isBookmarked ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-200'}`}
+                                          title={isBookmarked ? "Remove Bookmark" : "Bookmark Event"}
+                                        >
+                                          <Star size={16} className={isBookmarked ? 'fill-yellow-400' : ''} />
+                                        </button>
+                                      </div>
+                                  </div>
+                                  <div className="text-xs opacity-80 font-mono break-all pr-6">
+                                      {evt.detail}
+                                  </div>
+                                  {evt.packet?.payload && (
+                                      <div className="mt-2 pt-2 border-t border-white/10 text-xs font-mono text-gray-400 truncate opacity-60 flex items-center gap-2">
+                                          <FileText size={12} />
+                                          <span>Payload Preview: {evt.packet.payload.substring(0, 50)}...</span>
+                                      </div>
+                                  )}
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+              )})}
+              
+              {currentEvents.length === 0 && (
+                  <div className="text-center text-gray-500 py-10 italic">
+                      No events match this filter.
+                  </div>
+              )}
+              </div>
+          </div>
         </div>
+
+        {/* Pagination Footer */}
+        {totalPages > 1 && (
+          <div className="px-6 py-3 border-t border-cyber-700 bg-cyber-900/50 flex justify-between items-center">
+              <button 
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 0}
+                  className="p-1 rounded hover:bg-cyber-700 text-gray-400 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+              >
+                  <ChevronLeft size={20} />
+              </button>
+              <span className="text-xs text-gray-500 font-mono">
+                  Page {currentPage + 1} of {totalPages}
+              </span>
+              <button 
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage >= totalPages - 1}
+                  className="p-1 rounded hover:bg-cyber-700 text-gray-400 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+              >
+                  <ChevronRight size={20} />
+              </button>
+          </div>
+        )}
       </div>
 
-      {/* Pagination Footer */}
-      {totalPages > 1 && (
-        <div className="px-6 py-3 border-t border-cyber-700 bg-cyber-900/50 flex justify-between items-center">
-            <button 
-                onClick={() => handlePageChange(currentPage - 1)}
-                disabled={currentPage === 0}
-                className="p-1 rounded hover:bg-cyber-700 text-gray-400 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-            >
-                <ChevronLeft size={20} />
-            </button>
-            <span className="text-xs text-gray-500 font-mono">
-                Page {currentPage + 1} of {totalPages}
-            </span>
-            <button 
-                onClick={() => handlePageChange(currentPage + 1)}
-                disabled={currentPage >= totalPages - 1}
-                className="p-1 rounded hover:bg-cyber-700 text-gray-400 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-            >
-                <ChevronRight size={20} />
-            </button>
+      {/* Event Details Modal */}
+      {selectedEvent && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedEvent(null)}>
+          <div 
+            className="bg-cyber-800 border border-cyber-600 rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]" 
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className={`px-6 py-4 border-b border-cyber-700 flex justify-between items-center ${getColor(selectedEvent.severity)} bg-opacity-10`}>
+              <div className="flex items-center gap-3">
+                 <div className={`p-2 rounded-lg ${getColor(selectedEvent.severity)} bg-opacity-20`}>
+                   {getIcon(selectedEvent.type)}
+                 </div>
+                 <div>
+                   <h3 className="text-lg font-bold text-gray-100">{selectedEvent.summary}</h3>
+                   <div className="flex items-center gap-3 text-xs opacity-80">
+                      <span className="font-mono">{new Date(selectedEvent.timestamp).toLocaleTimeString()} ({selectedEvent.offset})</span>
+                      {selectedEvent.frameNumber && (
+                        <span className="px-1.5 py-0.5 bg-black/30 rounded border border-white/10 font-mono">Frame #{selectedEvent.frameNumber}</span>
+                      )}
+                   </div>
+                 </div>
+              </div>
+              <button 
+                onClick={() => setSelectedEvent(null)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors text-gray-400 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
+              
+              {/* Context / Detail */}
+              <div className="bg-cyber-900/50 p-4 rounded-lg border border-cyber-700/50">
+                <h4 className="text-sm font-semibold text-gray-300 mb-2 flex items-center gap-2">
+                  <Info size={14} className="text-cyber-accent" /> Event Context
+                </h4>
+                <p className="text-sm text-gray-300 leading-relaxed font-mono">
+                  {selectedEvent.detail}
+                </p>
+                {selectedEvent.count && selectedEvent.count > 1 && (
+                  <p className="mt-2 text-xs text-cyber-400">
+                    * This event occurred {selectedEvent.count} times in sequence.
+                  </p>
+                )}
+              </div>
+
+              {/* Packet Metadata Grid */}
+              {selectedEvent.packet && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  <div className="p-3 bg-cyber-900 rounded border border-cyber-700">
+                    <div className="text-xs text-gray-500 mb-1">Source</div>
+                    <div className="font-mono text-sm text-cyber-300 break-all">{selectedEvent.packet.srcIp}:{selectedEvent.packet.srcPort || '-'}</div>
+                  </div>
+                  <div className="p-3 bg-cyber-900 rounded border border-cyber-700">
+                    <div className="text-xs text-gray-500 mb-1">Destination</div>
+                    <div className="font-mono text-sm text-cyber-300 break-all">{selectedEvent.packet.dstIp}:{selectedEvent.packet.dstPort || '-'}</div>
+                  </div>
+                  <div className="p-3 bg-cyber-900 rounded border border-cyber-700">
+                    <div className="text-xs text-gray-500 mb-1">Protocol</div>
+                    <div className="font-mono text-sm text-cyber-300">{selectedEvent.packet.protocol}</div>
+                  </div>
+                  <div className="p-3 bg-cyber-900 rounded border border-cyber-700">
+                    <div className="text-xs text-gray-500 mb-1">Length</div>
+                    <div className="font-mono text-sm text-cyber-300">{selectedEvent.packet.length} bytes</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Payload Viewer */}
+              {selectedEvent.packet?.payload && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                    <FileCode size={14} className="text-cyber-accent" /> Payload Snippet
+                  </h4>
+                  <div className="relative">
+                    <pre className="block w-full bg-cyber-950 p-4 rounded-lg border border-cyber-700 font-mono text-xs text-cyber-100 overflow-x-auto whitespace-pre-wrap max-h-64 custom-scrollbar">
+                      {selectedEvent.packet.payload}
+                    </pre>
+                    <div className="absolute top-2 right-2 px-2 py-1 bg-cyber-800/80 rounded text-[10px] text-gray-500 border border-cyber-700">
+                      ASCII Representation
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-cyber-700 bg-cyber-900/80 flex justify-end gap-3">
+               <button
+                  onClick={(e) => toggleBookmark(e, selectedEvent.id)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors text-sm font-medium ${
+                    bookmarks.has(selectedEvent.id) 
+                      ? 'bg-yellow-500/10 border-yellow-500/50 text-yellow-400 hover:bg-yellow-500/20'
+                      : 'bg-cyber-800 border-cyber-600 text-gray-300 hover:bg-cyber-700'
+                  }`}
+               >
+                  <Star size={16} className={bookmarks.has(selectedEvent.id) ? 'fill-yellow-400' : ''} />
+                  {bookmarks.has(selectedEvent.id) ? 'Bookmarked' : 'Bookmark Event'}
+               </button>
+               <button 
+                 onClick={() => setSelectedEvent(null)}
+                 className="px-4 py-2 bg-cyber-accent hover:bg-cyber-accent-dark text-white rounded-lg text-sm font-medium transition-colors"
+               >
+                 Close
+               </button>
+            </div>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 };
-
