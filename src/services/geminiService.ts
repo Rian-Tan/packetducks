@@ -9,9 +9,69 @@ const getClient = () => {
   return new GoogleGenAI({ apiKey });
 };
 
+const getVtKey = () => {
+  return process.env.VT_API_KEY || "";
+};
+
+export const checkSingleVirusTotal = async (ip: string): Promise<string> => {
+  const apiKey = getVtKey();
+  if (!apiKey) {
+    throw new Error("VirusTotal API Key not configured");
+  }
+
+  // Use public CORS proxy to ensure it works in all environments (Dev/Preview/Prod) without server config
+  const targetUrl = `https://www.virustotal.com/api/v3/ip_addresses/${ip}`;
+  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+  
+  const response = await fetch(proxyUrl, {
+      headers: { 'x-apikey': apiKey }
+  });
+
+  if (!response.ok) {
+    throw new Error(`VT API Error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const stats = data.data?.attributes?.last_analysis_stats;
+  if (!stats) throw new Error("No stats found in VT response");
+
+  const malicious = stats.malicious || 0;
+  const total = (stats.malicious + stats.suspicious + stats.undetected + stats.harmless) || 0;
+  return `${malicious}/${total}`;
+};
+
+const enrichIocsWithVirusTotal = async (iocs: ThreatIntel['iocs']): Promise<ThreatIntel['iocs']> => {
+  // Relaxed type checking (case-insensitive) to catch 'ip' or 'IP'
+  const ipIocs = iocs.filter(ioc => ioc.type && ioc.type.toUpperCase() === 'IP');
+  
+  if (ipIocs.length === 0) return iocs;
+
+  // Limit to 4 to respect free tier rate limit (4 requests/minute)
+  const ipsToSearch = ipIocs.slice(0, 4); 
+  const results = new Map<string, string>();
+
+  for (const ioc of ipsToSearch) {
+    try {
+      const result = await checkSingleVirusTotal(ioc.value);
+      results.set(ioc.value, result);
+    } catch (e) {
+      console.warn(`VT lookup error for ${ioc.value}`, e);
+    }
+  }
+
+  return iocs.map(ioc => {
+    // Check type case-insensitively for the map back
+    if (ioc.type && ioc.type.toUpperCase() === 'IP' && results.has(ioc.value)) {
+      return { ...ioc, virusTotalDetections: results.get(ioc.value) };
+    }
+    return ioc;
+  });
+};
+
 export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<ThreatIntel> => {
   const ai = getClient();
   
+  // Prepare a concise summary for the LLM to avoid token limits
   const topProtocols = Object.entries(data.protocolCounts)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 15);
@@ -19,9 +79,11 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   const connectionSample = data.connections.slice(0, 30);
   const hostsSample = data.uniqueHosts.slice(0, 50);
 
+  // Filter for packets that have payload data
+  // Increased sample size to reduce false negatives
   const packetsWithPayload = data.rawSummary
-    .filter(p => p.payload && p.payload.length > 2)
-    .slice(0, 50);
+    .filter(p => p.payload && p.payload.length > 4) // >4 to ignore tiny noise
+    .slice(0, 150); 
 
   const packetPayloadSample = packetsWithPayload.map(p => ({
     src: p.srcIp,
@@ -32,13 +94,9 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   }));
 
   const prompt = `
-    Analyze the following network traffic summary from a PCAP file. Act as a senior IR analyst providing guidance to a Tier 1 SOC analyst.
-
-    **CRITICAL INTEL**: The following IPs have been positively identified as known Command & Control (C2) servers: 
-    ${JSON.stringify(data.flaggedC2Ips)}
+    Analyze the following network traffic summary derived from a PCAP file.
+    Act as a senior Incident Response (IR) analyst conducting post-mortem forensic analysis.
     
-    **This is a confirmed breach indicator. Your analysis must start from this premise.**
-
     Traffic Stats:
     - Total Packets: ${data.totalPackets}
     - Top Protocols: ${JSON.stringify(topProtocols)}
@@ -48,19 +106,23 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     Packet Payloads (Sample):
     ${JSON.stringify(packetPayloadSample)}
     
-    Your objective is to:
-    1.  **Prioritize C2 Activity**: Immediately focus on traffic to/from the flagged C2 IPs. This is the most critical part of the analysis.
-    2.  **Reconstruct the Kill Chain**: Based on the C2 communication, infer the stages (e.g., beaconing, data staging, exfiltration).
-    3.  **Identify the Compromised Host(s)**: Pinpoint which internal hosts are communicating with the C2 servers.
-    4.  **Generate Actionable IOCs**: Create IOCs for the C2 IPs and any other related suspicious activity. All C2 IPs MUST be listed as IOCs with CRITICAL severity.
-    5.  **Elevate Risk Score**: The risk score must be high (75-100) to reflect the confirmed C2 activity.
-    6.  **Provide Tier 1 Actions**: Generate a list of clear, concise, and actionable recommendations for a Tier 1 SOC analyst. These should be immediate response actions.
+    Your objective is to assess the security posture of this capture.
 
-    **Tier 1 Action Examples:**
-    - "Isolate Host: Immediately isolate the affected host with IP <HOST_IP> from the network to prevent potential lateral movement."
-    - "Block Indicator: Add the malicious IP address <MALICIOUS_IP> to the firewall blocklist."
-    - "Investigate Traffic: Analyze historical network traffic from the affected host to the malicious IP to identify the extent of the compromise."
-    - "Escalate: Escalate this incident to Tier 2 for further investigation and malware analysis."
+    CRITICAL DETECTION GUIDELINES:
+    1. **EVIDENCE-BASED DETECTION**: You must strictly analyze the "Packet Payloads" provided. Do not hallucinate threats that are not in the data.
+    2. **LOOK FOR SPECIFIC PATTERNS**:
+       - **Web Attacks**: SQL Injection ('UNION SELECT', 'OR 1=1'), XSS ('<script>'), Path Traversal ('../..').
+       - **Command Injection**: 'cmd.exe', '/bin/sh', 'whoami', 'powershell'.
+       - **Suspicious User-Agents**: 'sqlmap', 'nikto', 'curl', 'python-requests', 'hydra'.
+       - **Cleartext Auth**: 'Authorization: Basic', 'password=', 'user='.
+    3. **CONTEXTUAL ANALYSIS**: If you see standard protocols (HTTP, DNS) behaving normally, mark them as safe. However, if you see binary data in DNS TXT records (Tunneling) or non-HTTP traffic on port 80, flag it.
+    4. **SCORING RUBRIC**:
+       - **0-10 (Clean)**: Standard traffic, no anomalies.
+       - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols (Telnet), or generic scanning noise.
+       - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents).
+       - **76-100 (Critical)**: Confirmed compromise indicators (Shell responses, successful data exfiltration signatures).
+
+    If the capture appears clean, explicitly state "No significant threats detected in the provided sample."
 
     Return a structured JSON assessment.
   `;
@@ -68,8 +130,8 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   const schema: Schema = {
     type: Type.OBJECT,
     properties: {
-      riskScore: { type: Type.INTEGER, description: "Risk score from 0 (safe) to 100 (critical)" },
-      summary: { type: Type.STRING, description: "Executive summary focusing on the C2 activity, compromised hosts, and likely attacker objectives." },
+      riskScore: { type: Type.INTEGER, description: "Risk score from 0 (safe) to 100 (critical)." },
+      summary: { type: Type.STRING, description: "Executive summary of findings." },
       iocs: {
         type: Type.ARRAY,
         items: {
@@ -84,7 +146,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
       },
       recommendations: {
         type: Type.ARRAY,
-        items: { type: Type.STRING, description: "Clear and actionable steps for a Tier 1 SOC analyst." }
+        items: { type: Type.STRING }
       }
     },
     required: ["riskScore", "summary", "iocs", "recommendations"]
@@ -97,31 +159,31 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.1, // Lower temperature for more deterministic output based on the critical intel
+        temperature: 0.2, // Slightly increased to allow pattern matching flexibility without hallucination
       }
     });
 
     const text = response.text;
     if (!text) throw new Error("No response from AI");
     
-    return JSON.parse(text) as ThreatIntel;
+    const intel = JSON.parse(text) as ThreatIntel;
+
+    // Step 2: Enrich with VirusTotal Data (API)
+    // We do this server-side or via proxy to avoid CORS
+    if (intel.iocs && intel.iocs.length > 0) {
+      intel.iocs = await enrichIocsWithVirusTotal(intel.iocs);
+    }
+
+    return intel;
+
   } catch (error) {
     console.error("Gemini Analysis Failed:", error);
-    // Fallback if AI fails
+    // Fallback if AI fails or key missing
     return {
-      riskScore: 95, // High default score due to C2 being flagged by the parser
-      summary: "AI Analysis unavailable. Critical Threat Detected: The PCAP analysis has identified traffic to known Command & Control (C2) servers. Immediate investigation is required.",
-      iocs: data.flaggedC2Ips.map(ip => ({
-        value: ip,
-        type: 'IP',
-        description: 'Connection to a known Command & Control (C2) server detected by internal threat intelligence.',
-        severity: 'CRITICAL'
-      })),
-      recommendations: [
-        "Immediately isolate any host(s) communicating with the flagged C2 IPs.",
-        "Block the flagged C2 IPs at the network perimeter.",
-        "Begin forensic analysis on the compromised host(s)."
-      ]
+      riskScore: 0,
+      summary: "AI Analysis unavailable. Check API Key or network connection.",
+      iocs: [],
+      recommendations: ["Manually review cleartext protocols."]
     };
   }
 };
