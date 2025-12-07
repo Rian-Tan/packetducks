@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from '@google/genai';
-import { PcapAnalysisResult, ThreatIntel, IpInfoData } from '../types';
+import { PcapAnalysisResult, ThreatIntel, IpInfoData, PacketSummary } from '../types';
 
 const getClient = () => {
   const apiKey = process.env.API_KEY;
@@ -103,68 +103,97 @@ const enrichIocsWithVirusTotal = async (iocs: ThreatIntel['iocs']): Promise<Thre
   });
 };
 
+// Helper to encode string to Base64 safely for large payloads
+const base64Encode = (str: string): string => {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  const len = bytes.byteLength;
+  const chunkSize = 0x8000; // 32KB chunks to avoid stack overflow
+  for (let i = 0; i < len; i += chunkSize) {
+    // @ts-ignore
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+};
+
+// Convert packets to CSV format for the model to process as a file
+const packetsToCsv = (packets: PacketSummary[]): string => {
+  // Header
+  let csv = 'Frame,Timestamp,SrcIP,SrcPort,DstIP,DstPort,Protocol,Length,Info,PayloadSnippet\n';
+  
+  packets.forEach(p => {
+    // Escape payload for CSV (replace quotes and newlines)
+    const payloadSafe = p.payload 
+      ? `"${p.payload.replace(/"/g, '""').replace(/\n/g, ' ').substring(0, 300)}"` 
+      : '""';
+    
+    // Construct Info string
+    let info = "";
+    if (p.flags) {
+      const flags = [];
+      if (p.flags & 0x02) flags.push('SYN');
+      if (p.flags & 0x10) flags.push('ACK');
+      if (p.flags & 0x01) flags.push('FIN');
+      if (p.flags & 0x04) flags.push('RST');
+      if (p.flags & 0x08) flags.push('PSH');
+      info = flags.join(' ');
+    }
+    
+    csv += `${p.frameNumber},${p.timestamp},${p.srcIp},${p.srcPort || ''},${p.dstIp},${p.dstPort || ''},${p.protocol},${p.length},"${info}",${payloadSafe}\n`;
+  });
+  
+  return csv;
+};
+
 export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<ThreatIntel> => {
   const ai = getClient();
   
-  // Prepare a concise summary for the LLM to avoid token limits
+  // 1. Contextual Data (Top Stats)
   const topProtocols = Object.entries(data.protocolCounts)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 15);
 
-  const connectionSample = data.connections.slice(0, 30);
-  const hostsSample = data.uniqueHosts.slice(0, 50);
-
-  // Filter for packets that have payload data
-  // Increased sample size to reduce false negatives
-  const packetsWithPayload = data.rawSummary
-    .filter(p => p.payload && p.payload.length > 4) // >4 to ignore tiny noise
-    .slice(0, 150); 
-
-  const packetPayloadSample = packetsWithPayload.map(p => ({
-    src: p.srcIp,
-    dst: p.dstIp,
-    proto: p.protocol,
-    dstPort: p.dstPort,
-    payloadSnippet: p.payload
-  }));
-
   const ipContext = data.ipInfo 
       ? JSON.stringify(Object.values(data.ipInfo).map(({ ip, as_name, country, asn }) => ({ ip, org: as_name, country, asn })))
       : "No external IP context available.";
+  
+  const attackStats = data.attackStats ? JSON.stringify(data.attackStats) : "No pre-calculated attack stats.";
+
+  // 2. Prepare the Dataset "File" (CSV)
+  // We include a large sample, much larger than the previous plaintext limit.
+  // 1.5 Flash has a large context window (1M tokens), but huge PCAPs can exceed it.
+  // We cap at 4,000 packets to ensure we stay under the limit (assuming ~250 tokens per line).
+  const datasetSlice = data.rawSummary.slice(0, 4000);
+  const csvData = packetsToCsv(datasetSlice);
+  const base64Csv = base64Encode(csvData);
 
   const prompt = `
-    Analyze the following network traffic summary derived from a PCAP file.
+    Analyze the attached Network Traffic Log (CSV file) derived from a PCAP capture.
     Act as a senior Incident Response (IR) analyst conducting post-mortem forensic analysis.
     
-    Traffic Stats:
-    - Total Packets: ${data.totalPackets}
+    Contextual Intelligence:
     - Top Protocols: ${JSON.stringify(topProtocols)}
-    - Unique Hosts Sample: ${JSON.stringify(hostsSample)}
-    - Connections Sample: ${JSON.stringify(connectionSample)}
+    - Detected Attack Signatures (Heuristic Scan): ${attackStats}
+    - External IP Intelligence (Geo/ASN): ${ipContext}
     
-    External IP Intelligence (Geo/ASN/ISP):
-    ${ipContext}
-
-    Packet Payloads (Sample):
-    ${JSON.stringify(packetPayloadSample)}
-    
-    Your objective is to assess the security posture of this capture.
+    Your objective is to assess the security posture of this capture based on the attached CSV log.
 
     CRITICAL DETECTION GUIDELINES:
-    1. **EVIDENCE-BASED DETECTION**: You must strictly analyze the "Packet Payloads" provided. Do not hallucinate threats that are not in the data.
-    2. **LOOK FOR SPECIFIC PATTERNS**:
-       - **Web Attacks**: SQL Injection ('UNION SELECT', 'OR 1=1'), XSS ('<script>'), Path Traversal ('../..').
+    1. **EVIDENCE-BASED DETECTION**: You must strictly analyze the attached CSV data. 
+    2. **LOOK FOR SPECIFIC PATTERNS IN PAYLOADS**:
+       - **Web Attacks**: SQL Injection ('UNION SELECT', 'OR 1=1'), XSS ('<script>'), Path Traversal.
        - **Command Injection**: 'cmd.exe', '/bin/sh', 'whoami', 'powershell'.
        - **Suspicious User-Agents**: 'sqlmap', 'nikto', 'curl', 'python-requests', 'hydra'.
        - **Cleartext Auth**: 'Authorization: Basic', 'password=', 'user='.
-       - **Geo-Location Anomalies**: **USE THE IP INTELLIGENCE PROVIDED**. If a host connects to an IP in a high-risk country (e.g. Russia, China, North Korea) or a known Bulletproof Hosting ASN (as per provided IP Intelligence), and the traffic looks suspicious, flag it immediately.
-    3. **CONTEXTUAL ANALYSIS**: If you see standard protocols (HTTP, DNS) behaving normally, mark them as safe. However, if you see binary data in DNS TXT records (Tunneling) or non-HTTP traffic on port 80, flag it.
-    4. **SCORING RUBRIC**:
+       - **Geo-Location Anomalies**: Cross-reference IPs in the CSV with the provided IP Intelligence.
+    3. **SCORING RUBRIC**:
        - **0-10 (Clean)**: Standard traffic, no anomalies.
-       - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols (Telnet), or generic scanning noise.
-       - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents, suspicious Geo-IP connections).
-       - **76-100 (Critical)**: Confirmed compromise indicators (Shell responses, successful data exfiltration signatures).
+       - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols, or generic scanning noise.
+       - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents).
+       - **76-100 (Critical)**: Confirmed compromise (Shell responses, successful data exfiltration, C2 beaconing).
 
+    If the "Detected Attack Signatures" count is high (>0), your Risk Score MUST reflect this (High/Critical), as these are hard regex matches found in the file.
+    
     If the capture appears clean, explicitly state "No significant threats detected in the provided sample."
 
     Return a structured JSON assessment.
@@ -198,11 +227,24 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: prompt,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { 
+              inlineData: { 
+                mimeType: 'text/csv', 
+                data: base64Csv 
+              } 
+            }
+          ]
+        }
+      ],
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.2, // Slightly increased to allow pattern matching flexibility without hallucination
+        temperature: 0.1, // Strict/Deterministic
       }
     });
 
@@ -211,8 +253,7 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     
     const intel = JSON.parse(text) as ThreatIntel;
 
-    // Step 2: Enrich with VirusTotal Data (API)
-    // We do this server-side or via proxy to avoid CORS
+    // Enrich with VirusTotal Data (API)
     if (intel.iocs && intel.iocs.length > 0) {
       intel.iocs = await enrichIocsWithVirusTotal(intel.iocs);
     }
@@ -221,12 +262,12 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
 
   } catch (error) {
     console.error("Gemini Analysis Failed:", error);
-    // Fallback if AI fails or key missing
+    // Fallback
     return {
       riskScore: 0,
-      summary: "AI Analysis unavailable. Check API Key or network connection.",
+      summary: "AI Analysis unavailable. The file may be too large or the API Key is invalid.",
       iocs: [],
-      recommendations: ["Manually review cleartext protocols."]
+      recommendations: ["Manually review cleartext protocols.", "Check API quotas."]
     };
   }
 };

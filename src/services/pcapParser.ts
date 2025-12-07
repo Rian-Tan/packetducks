@@ -1,6 +1,14 @@
 import { PacketSummary, PcapAnalysisResult, PortUsage, ProtocolType } from '../types';
 import { COMMON_PORTS, TCP_FLAGS } from '../constants';
 
+const ATTACK_SIGS: Record<string, RegExp> = {
+  'SQL Injection': /('|"|%27|%22)\s*(or|and)\s+['"]?1['"]?=['"]?1|union\s+select|select\s+.*\s+from/i,
+  'XSS': /(<script\b[^>]*>|javascript:[^"'\s]+|on(error|load|click|mouseover|submit)\s*=|vbscript:|alert\()/i,
+  'Command Injection': /(cmd\.exe|\/bin\/sh|\/bin\/bash|whoami|cat\s+\/etc\/passwd|powershell)/i,
+  'Suspicious User-Agent': /User-Agent:\s*(sqlmap|nikto|nmap|curl|python-requests|gobuster|hydra)/i,
+  'Cleartext Auth': /(Authorization:\s*Basic|password=|user=|pass=)/i
+};
+
 // Helper to format IP addresses
 const formatIPv4 = (view: DataView, offset: number): string => {
   return `${view.getUint8(offset)}.${view.getUint8(offset + 1)}.${view.getUint8(offset + 2)}.${view.getUint8(offset + 3)}`;
@@ -68,6 +76,9 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
   const uniqueHosts = new Set<string>();
   const connections = new Set<string>();
   const protocolCounts: Record<string, number> = {};
+  
+  const attackStats: Record<string, number> = {};
+  Object.keys(ATTACK_SIGS).forEach(k => attackStats[k] = 0);
 
   const tcpUsage: Record<number, PortUsage> = {};
   const udpUsage: Record<number, PortUsage> = {};
@@ -77,15 +88,6 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
       store[port] = { sport: 0, dport: 0, syn_dst: 0, synack_src: 0 };
     }
   };
-
-  // Heuristic Scan - Pre-compiled Regexes (from constants/timeline)
-  // We duplicate minimal regex here to avoid circular dep issues or complex imports for now,
-  // or ideally move detection logic to a shared utility. 
-  // For strictly counting stats, we'll do basic checks.
-  
-  // Actually, let's keep it simple: we just need to parse correctly.
-  // Attack stats are calculated in TimelineView mostly, but for the graph tooltip we wanted them.
-  // We can add them later if needed, user asked to fix frame IDs specifically.
 
   while (offset < view.byteLength) {
     if (offset + 16 > view.byteLength) break;
@@ -243,6 +245,12 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           const payloadStart = l4Offset + dataOffset;
           if (payloadStart < packetEnd) {
             pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
+            // Check for attacks
+            Object.entries(ATTACK_SIGS).forEach(([name, regex]) => {
+              if (regex.test(pSummary.payload!)) {
+                attackStats[name]++;
+              }
+            });
           }
 
           initUsage(tcpUsage, srcPort);
@@ -276,6 +284,12 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           const payloadStart = l4Offset + 8;
           if (payloadStart < packetEnd) {
             pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
+            // Check for attacks
+            Object.entries(ATTACK_SIGS).forEach(([name, regex]) => {
+              if (regex.test(pSummary.payload!)) {
+                attackStats[name]++;
+              }
+            });
           }
 
           initUsage(udpUsage, srcPort);
@@ -355,6 +369,7 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }),
     startTime,
     endTime,
-    rawSummary: packets
+    rawSummary: packets,
+    attackStats
   };
 };

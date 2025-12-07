@@ -34,7 +34,7 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
     return (
       <div className="w-full h-64 flex flex-col items-center justify-center space-y-4 bg-cyber-800/30 rounded-xl border border-cyber-700 animate-pulse">
         <Activity className="w-12 h-12 text-cyber-500 animate-bounce" />
-        <p className="text-cyber-400 font-mono">
+        <p className="text-cyber-400 font-mono text-center">
           Analysing for threats & checking VirusTotal...
         </p>
       </div>
@@ -143,9 +143,9 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
                   >
                     <AlertTriangle size={16} />
                   </div>
-                  <div className="flex-1">
-                    <div className="flex justify-between items-start">
-                      <span className="font-mono text-cyber-accent font-bold flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start gap-2">
+                      <span className="font-mono text-cyber-accent font-bold flex flex-wrap items-center gap-2 break-all">
                         {ioc.value}
                         {hostInfo?.country_code && (
                           <img
@@ -157,7 +157,7 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
                         )}
                       </span>
                       <span
-                        className={`text-xs px-2 py-0.5 rounded font-mono uppercase ${ioc.severity === "CRITICAL"
+                        className={`shrink-0 text-xs px-2 py-0.5 rounded font-mono uppercase ${ioc.severity === "CRITICAL"
                             ? "bg-red-900 text-red-200"
                             : "bg-cyber-700 text-gray-300"
                           }`}

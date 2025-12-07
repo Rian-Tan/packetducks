@@ -45,6 +45,7 @@ export interface PcapAnalysisResult {
   endTime: Date;
   rawSummary: PacketSummary[]; // Kept for AI context
   ipInfo?: Record<string, IpInfoData>;
+  attackStats?: Record<string, number>;
 }
 
 export interface ThreatIntel {
