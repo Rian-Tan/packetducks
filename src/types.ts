@@ -24,6 +24,17 @@ export interface PortUsage {
   synack_src: number;
 }
 
+export interface IpInfoData {
+  ip: string;
+  asn?: string;
+  as_name?: string;
+  as_domain?: string;
+  country_code?: string;
+  country?: string;
+  continent_code?: string;
+  continent?: string;
+}
+
 export interface PcapAnalysisResult {
   totalPackets: number;
   protocolCounts: Record<string, number>;
@@ -32,6 +43,7 @@ export interface PcapAnalysisResult {
   startTime: Date;
   endTime: Date;
   rawSummary: PacketSummary[]; // Kept for AI context
+  ipInfo?: Record<string, IpInfoData>;
 }
 
 export interface ThreatIntel {
@@ -42,6 +54,7 @@ export interface ThreatIntel {
     type: 'IP' | 'PORT' | 'PATTERN';
     description: string;
     severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    virusTotalDetections?: string;
   }[];
   recommendations: string[];
 }

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ThreatIntel } from "../types";
+import { ThreatIntel, IpInfoData } from "../types";
 import { checkSingleVirusTotal } from "../services/geminiService";
 import {
   ShieldAlert,
@@ -11,17 +11,20 @@ import {
   ExternalLink,
   Bug,
   Search,
-  Loader2
+  Loader2,
+  Globe
 } from "lucide-react";
 
 interface ThreatDashboardProps {
   data: ThreatIntel | null;
   loading: boolean;
+  ipInfo?: Record<string, IpInfoData>;
 }
 
 export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
   data,
   loading,
+  ipInfo,
 }) => {
   const [manualChecks, setManualChecks] = useState<Record<string, string>>({});
   const [checkingIps, setCheckingIps] = useState<Record<string, boolean>>({});
@@ -43,7 +46,7 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
   const handleManualCheck = async (ip: string) => {
     setCheckingIps(prev => ({ ...prev, [ip]: true }));
     setCheckErrors(prev => ({ ...prev, [ip]: '' }));
-    
+
     try {
       const result = await checkSingleVirusTotal(ip);
       setManualChecks(prev => ({ ...prev, [ip]: result }));
@@ -63,9 +66,9 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
   const getVirusTotalStatus = (val: string) => {
     const parts = val.split('/');
     if (parts.length === 2) {
-        const count = parseInt(parts[0], 10);
-        const total = parseInt(parts[1], 10);
-        return { count, total, isMalicious: count > 0, label: val };
+      const count = parseInt(parts[0], 10);
+      const total = parseInt(parts[1], 10);
+      return { count, total, isMalicious: count > 0, label: val };
     }
     return { count: 0, total: 0, isMalicious: false, label: val };
   };
@@ -123,113 +126,130 @@ export const ThreatDashboard: React.FC<ThreatDashboardProps> = ({
               const isIp = ioc.type && ioc.type.toUpperCase() === 'IP';
               const isLoading = checkingIps[ioc.value];
               const error = checkErrors[ioc.value];
+              const hostInfo = isIp && ipInfo ? ipInfo[ioc.value] : null;
 
               return (
-              <div
-                key={idx}
-                className="p-4 flex items-start gap-4 hover:bg-cyber-700/30 transition-colors"
-              >
                 <div
-                  className={`mt-1 p-1 rounded ${
-                    ioc.severity === "CRITICAL"
-                      ? "bg-red-500/20 text-red-400"
-                      : ioc.severity === "HIGH"
-                        ? "bg-orange-500/20 text-orange-400"
-                        : "bg-yellow-500/20 text-yellow-400"
-                  }`}
+                  key={idx}
+                  className="p-4 flex items-start gap-4 hover:bg-cyber-700/30 transition-colors"
                 >
-                  <AlertTriangle size={16} />
-                </div>
-                <div className="flex-1">
-                  <div className="flex justify-between items-start">
-                    <span className="font-mono text-cyber-accent font-bold">
-                      {ioc.value}
-                    </span>
-                    <span
-                      className={`text-xs px-2 py-0.5 rounded font-mono uppercase ${
-                        ioc.severity === "CRITICAL"
-                          ? "bg-red-900 text-red-200"
-                          : "bg-cyber-700 text-gray-300"
+                  <div
+                    className={`mt-1 p-1 rounded ${ioc.severity === "CRITICAL"
+                        ? "bg-red-500/20 text-red-400"
+                        : ioc.severity === "HIGH"
+                          ? "bg-orange-500/20 text-orange-400"
+                          : "bg-yellow-500/20 text-yellow-400"
                       }`}
-                    >
-                      {ioc.severity}
-                    </span>
+                  >
+                    <AlertTriangle size={16} />
                   </div>
-                  <div className="text-xs text-gray-500 font-mono mt-1 mb-1">
-                    {ioc.type}
-                  </div>
-                  <p className="text-sm text-gray-300 mb-2">{ioc.description}</p>
-                  
-                  {/* VirusTotal Display Logic */}
-                  {isIp && (
-                    <div className="mt-3">
-                      {vtValue ? (
-                        <div className="flex items-center gap-3 bg-cyber-900/50 p-2 rounded border border-cyber-700 animate-fade-in">
+                  <div className="flex-1">
+                    <div className="flex justify-between items-start">
+                      <span className="font-mono text-cyber-accent font-bold flex items-center gap-2">
+                        {ioc.value}
+                        {hostInfo?.country_code && (
+                          <img
+                            src={`https://flagcdn.com/16x12/${hostInfo.country_code.toLowerCase()}.png`}
+                            alt={hostInfo.country}
+                            title={hostInfo.country}
+                            className="rounded-[1px] opacity-80"
+                          />
+                        )}
+                      </span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded font-mono uppercase ${ioc.severity === "CRITICAL"
+                            ? "bg-red-900 text-red-200"
+                            : "bg-cyber-700 text-gray-300"
+                          }`}
+                      >
+                        {ioc.severity}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 font-mono mt-1 mb-1">
+                      <span className="bg-cyber-900 px-1.5 py-0.5 rounded border border-cyber-700/50">{ioc.type}</span>
+                      {hostInfo && (
+                        <>
+                          <span className="flex items-center gap-1"><Globe size={10} /> {hostInfo.country || hostInfo.country_code}</span>
+                          <span className="text-gray-600">|</span>
+                          <span title={hostInfo.as_name}>{hostInfo.asn}</span>
+                        </>
+                      )}
+                    </div>
+
+                    <p className="text-sm text-gray-300 mb-2">{ioc.description}</p>
+
+                    {/* VirusTotal Display Logic */}
+                    {isIp && (
+                      <div className="mt-3">
+                        {vtValue ? (
+                          <div className="flex items-center gap-3 bg-cyber-900/50 p-2 rounded border border-cyber-700 animate-fade-in">
                             {(() => {
-                                const status = getVirusTotalStatus(vtValue);
-                                return (
-                                    <>
-                                        <div className={`flex items-center gap-1.5 ${status.isMalicious ? 'text-red-400' : 'text-emerald-400'}`}>
-                                            <Bug size={14} className={status.isMalicious ? "text-red-500" : "text-emerald-500"} />
-                                            <span className="text-xs font-bold">VirusTotal: {status.label}</span>
-                                        </div>
-                                        <div className="flex-1 h-1.5 bg-cyber-700 rounded-full overflow-hidden max-w-[100px]">
-                                            <div 
-                                                className={`h-full rounded-full ${status.isMalicious ? 'bg-red-500' : 'bg-emerald-500'}`}
-                                                style={{ width: `${Math.min(100, (status.count / Math.max(status.total, 1)) * 100)}%` }}
-                                            ></div>
-                                        </div>
-                                    </>
-                                );
+                              const status = getVirusTotalStatus(vtValue);
+                              return (
+                                <>
+                                  <div className={`flex items-center gap-1.5 ${status.isMalicious ? 'text-red-400' : 'text-emerald-400'}`}>
+                                    <Bug size={14} className={status.isMalicious ? "text-red-500" : "text-emerald-500"} />
+                                    <span className="text-xs font-bold">VirusTotal: {status.label}</span>
+                                  </div>
+                                  <div className="flex-1 h-1.5 bg-cyber-700 rounded-full overflow-hidden max-w-[100px]">
+                                    <div
+                                      className={`h-full rounded-full ${status.isMalicious ? 'bg-red-500' : 'bg-emerald-500'}`}
+                                      style={{ width: `${Math.min(100, (status.count / Math.max(status.total, 1)) * 100)}%` }}
+                                    ></div>
+                                  </div>
+                                </>
+                              );
                             })()}
-                            <a 
-                              href={`https://www.virustotal.com/gui/ip-address/${ioc.value}`} 
-                              target="_blank" 
+                            <a
+                              href={`https://www.virustotal.com/gui/ip-address/${ioc.value}`}
+                              target="_blank"
                               rel="noopener noreferrer"
                               className="text-xs text-cyber-500 hover:text-cyber-400 flex items-center gap-1 ml-auto"
                             >
                               View Report <ExternalLink size={10} />
                             </a>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                           {!isLoading && !error && (
-                             <button 
-                               onClick={() => handleManualCheck(ioc.value)}
-                               className="flex items-center gap-2 text-xs bg-cyber-700 hover:bg-cyber-600 border border-cyber-600 text-gray-300 px-3 py-1.5 rounded transition-colors"
-                             >
-                               <Search size={12} />
-                               Check VirusTotal
-                             </button>
-                           )}
-                           
-                           {isLoading && (
-                             <div className="flex items-center gap-2 text-xs text-cyber-400 bg-cyber-900/50 px-3 py-1.5 rounded border border-cyber-700/50">
-                               <Loader2 size={12} className="animate-spin" />
-                               Checking API...
-                             </div>
-                           )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            {!isLoading && !error && (
+                              <button
+                                onClick={() => handleManualCheck(ioc.value)}
+                                className="flex items-center gap-2 text-xs bg-cyber-700 hover:bg-cyber-600 border border-cyber-600 text-gray-300 px-3 py-1.5 rounded transition-colors"
+                              >
+                                <Search size={12} />
+                                Check VirusTotal
+                              </button>
+                            )}
 
-                           {error && (
-                             <div className="flex items-center gap-2">
-                               <span className="text-xs text-red-400 bg-red-900/20 px-3 py-1.5 rounded border border-red-900/50">
-                                 Lookup Failed
-                               </span>
-                               <button 
-                                 onClick={() => handleManualCheck(ioc.value)}
-                                 className="text-xs underline text-cyber-500 hover:text-cyber-400"
-                               >
-                                 Retry
-                               </button>
-                             </div>
-                           )}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                            {isLoading && (
+                              <div className="flex items-center gap-2 text-xs text-cyber-400 bg-cyber-900/50 px-3 py-1.5 rounded border border-cyber-700/50">
+                                <Loader2 size={12} className="animate-spin" />
+                                Checking API...
+                              </div>
+                            )}
+
+                            {error && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-red-400 bg-red-900/20 px-3 py-1.5 rounded border border-red-900/50">
+                                  Lookup Failed
+                                </span>
+                                <button
+                                  onClick={() => handleManualCheck(ioc.value)}
+                                  className="text-xs underline text-cyber-500 hover:text-cyber-400"
+                                >
+                                  Retry
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )})
+              )
+            })
           )}
         </div>
       </div>
