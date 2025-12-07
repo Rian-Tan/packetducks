@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from '@google/genai';
-import { PcapAnalysisResult, ThreatIntel } from '../types';
+import { PcapAnalysisResult, ThreatIntel, IpInfoData } from '../types';
 
 const getClient = () => {
   const apiKey = process.env.API_KEY;
@@ -10,7 +10,42 @@ const getClient = () => {
 };
 
 const getVtKey = () => {
-  return process.env.VT_API_KEY || "";
+  return process.env.VT_API_KEY || "3623edc99f6e538b7b5af487a52027c3f11c15833af26c7f5620412fce7ae6ae";
+};
+
+const IPINFO_TOKEN = '04016f0e1f1a5b';
+
+const isPrivateIp = (ip: string): boolean => {
+  const parts = ip.split('.').map(n => parseInt(n, 10));
+  if (parts.length === 4) {
+    if (parts[0] === 10) return true;
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    if (parts[0] === 127) return true;
+    if (parts[0] === 0) return true;
+    if (parts[0] >= 224 && parts[0] <= 239) return true;
+    if (parts[0] === 169 && parts[1] === 254) return true; // Link-local
+  }
+  if (ip === '::1') return true;
+  if (ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
+  return false;
+};
+
+export const enrichIpInfo = async (ips: string[]): Promise<Record<string, IpInfoData>> => {
+  const publicIps = ips.filter(ip => !isPrivateIp(ip));
+  const targets = publicIps.slice(0, 25); // Limit to 25 to respect potential rate limits/performance
+  const results: Record<string, IpInfoData> = {};
+  
+  await Promise.all(targets.map(async (ip) => {
+      try {
+          const res = await fetch(`https://api.ipinfo.io/lite/${ip}?token=${IPINFO_TOKEN}`);
+          if(res.ok) {
+              const data = await res.json();
+              results[ip] = data;
+          }
+      } catch(e) { console.error(`Failed to fetch IP info for ${ip}`, e); }
+  }));
+  return results;
 };
 
 export const checkSingleVirusTotal = async (ip: string): Promise<string> => {
@@ -93,6 +128,10 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     payloadSnippet: p.payload
   }));
 
+  const ipContext = data.ipInfo 
+      ? JSON.stringify(Object.values(data.ipInfo).map(({ ip, as_name, country, asn }) => ({ ip, org: as_name, country, asn })))
+      : "No external IP context available.";
+
   const prompt = `
     Analyze the following network traffic summary derived from a PCAP file.
     Act as a senior Incident Response (IR) analyst conducting post-mortem forensic analysis.
@@ -103,6 +142,9 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     - Unique Hosts Sample: ${JSON.stringify(hostsSample)}
     - Connections Sample: ${JSON.stringify(connectionSample)}
     
+    External IP Intelligence (Geo/ASN/ISP):
+    ${ipContext}
+
     Packet Payloads (Sample):
     ${JSON.stringify(packetPayloadSample)}
     
@@ -115,11 +157,12 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
        - **Command Injection**: 'cmd.exe', '/bin/sh', 'whoami', 'powershell'.
        - **Suspicious User-Agents**: 'sqlmap', 'nikto', 'curl', 'python-requests', 'hydra'.
        - **Cleartext Auth**: 'Authorization: Basic', 'password=', 'user='.
+       - **Geo-Location Anomalies**: **USE THE IP INTELLIGENCE PROVIDED**. If a host connects to an IP in a high-risk country (e.g. Russia, China, North Korea) or a known Bulletproof Hosting ASN (as per provided IP Intelligence), and the traffic looks suspicious, flag it immediately.
     3. **CONTEXTUAL ANALYSIS**: If you see standard protocols (HTTP, DNS) behaving normally, mark them as safe. However, if you see binary data in DNS TXT records (Tunneling) or non-HTTP traffic on port 80, flag it.
     4. **SCORING RUBRIC**:
        - **0-10 (Clean)**: Standard traffic, no anomalies.
        - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols (Telnet), or generic scanning noise.
-       - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents).
+       - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents, suspicious Geo-IP connections).
        - **76-100 (Critical)**: Confirmed compromise indicators (Shell responses, successful data exfiltration signatures).
 
     If the capture appears clean, explicitly state "No significant threats detected in the provided sample."

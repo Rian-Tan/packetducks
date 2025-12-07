@@ -4,7 +4,7 @@ import { ProtocolChart } from './components/ProtocolChart';
 import { ThreatDashboard } from './components/ThreatDashboard';
 import { TimelineView } from './components/TimelineView';
 import { parsePcap } from './services/pcapParser';
-import { generateThreatIntel } from './services/geminiService';
+import { generateThreatIntel, enrichIpInfo } from './services/geminiService';
 import { PcapAnalysisResult, ThreatIntel } from './types';
 import ReportGenerator from './components/ReportGenerator';
 import { Shield, Network, Activity, FileDigit, Globe } from 'lucide-react';
@@ -16,6 +16,10 @@ const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Tooltip State
+  const [hoveredIp, setHoveredIp] = useState<string | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{x: number, y: number} | null>(null);
 
   const processFile = async (selectedFile: File) => {
     try {
@@ -32,13 +36,16 @@ const App: React.FC = () => {
         throw new Error("No packets found in file. Ensure the file is a valid PCAP (not PCAPNG) and is not empty.");
       }
 
-      setAnalysis(result);
+      // 1.5. Enrich with IP Info
+      const ipInfo = await enrichIpInfo(result.uniqueHosts);
+      const enrichedResult = { ...result, ipInfo };
+      setAnalysis(enrichedResult);
 
       // 2. AI Analysis
       setIsProcessing(false); // Parsing done
       setIsAiLoading(true); // Start AI
       
-      const intelligence = await generateThreatIntel(result);
+      const intelligence = await generateThreatIntel(enrichedResult);
       setThreatIntel(intelligence);
 
     } catch (err: any) {
@@ -59,9 +66,6 @@ const App: React.FC = () => {
     if (parts.length !== 4) return 'bg-gray-500/20 border-gray-500/40 text-gray-300';
   
     // Private ranges
-    // 10.0.0.0 - 10.255.255.255
-    // 172.16.0.0 - 172.31.255.255
-    // 192.168.0.0 - 192.168.255.255
     if (
       parts[0] === 10 ||
       (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
@@ -80,8 +84,14 @@ const App: React.FC = () => {
     return 'bg-sky-500/20 border-sky-500/40 text-sky-300';
   };
 
+  const handleMouseEnterHost = (e: React.MouseEvent, ip: string) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setHoveredIp(ip);
+    setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top - 10 });
+  };
+
   return (
-    <div className="min-h-screen bg-cyber-900 text-slate-200 font-sans selection:bg-cyber-accent selection:text-white">
+    <div className="min-h-screen bg-cyber-900 text-slate-200 font-sans selection:bg-cyber-accent selection:text-white relative">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-cyber-900/80 backdrop-blur-md border-b border-cyber-700">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
@@ -196,7 +206,7 @@ const App: React.FC = () => {
                     </div>
                  </section>
 
-                 {/* Detected Hosts (Moved Here) */}
+                 {/* Detected Hosts */}
                  <section className="bg-cyber-800 border border-cyber-700 rounded-xl p-6">
                     <div className="flex flex-wrap items-center justify-between mb-4 gap-4">
                         <h3 className="text-lg font-semibold flex items-center gap-2">
@@ -210,14 +220,26 @@ const App: React.FC = () => {
                         </div>
                     </div>
                     <div className="flex flex-wrap gap-2 max-h-60 overflow-y-auto custom-scrollbar p-1">
-                      {analysis.uniqueHosts.map(host => (
-                        <span 
-                          key={host} 
-                          className={`px-2.5 py-1 border rounded text-xs font-mono transition-colors cursor-default ${getHostStyle(host)}`}
-                        >
-                          {host}
-                        </span>
-                      ))}
+                      {analysis.uniqueHosts.map(host => {
+                        const info = analysis.ipInfo?.[host];
+                        return (
+                          <span 
+                            key={host} 
+                            className={`group cursor-pointer px-2.5 py-1 border rounded text-xs font-mono transition-colors flex items-center gap-1.5 ${getHostStyle(host)}`}
+                            onMouseEnter={(e) => handleMouseEnterHost(e, host)}
+                            onMouseLeave={() => setHoveredIp(null)}
+                          >
+                            {info?.country_code && (
+                              <img 
+                                src={`https://flagcdn.com/16x12/${info.country_code.toLowerCase()}.png`} 
+                                alt={info.country_code}
+                                className="opacity-80 rounded-[1px]"
+                              />
+                            )}
+                            {host}
+                          </span>
+                        );
+                      })}
                     </div>
                  </section>
               </div>
@@ -225,7 +247,7 @@ const App: React.FC = () => {
               {/* Right Col: Threat Intel */}
               <div className="space-y-8">
                  <div id="threat-dashboard">
-                    <ThreatDashboard data={threatIntel} loading={isAiLoading} />
+                    <ThreatDashboard data={threatIntel} ipInfo={analysis.ipInfo} loading={isAiLoading} />
                  </div>
                  {analysis && threatIntel && (
                    <ReportGenerator 
@@ -248,6 +270,44 @@ const App: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Fixed Tooltip - Portal-like behavior to escape overflow */}
+      {hoveredIp && tooltipPos && analysis?.ipInfo?.[hoveredIp] && (
+        <div 
+            className="fixed z-[60] w-64 p-3 bg-cyber-900 text-xs text-gray-300 rounded-lg shadow-2xl border border-cyber-600 pointer-events-none animate-fade-in"
+            style={{ 
+                left: tooltipPos.x, 
+                top: tooltipPos.y, 
+                transform: 'translate(-50%, -100%)' 
+            }}
+        >
+            <div className="font-bold text-white mb-2 border-b border-cyber-700 pb-1 flex items-center justify-between">
+                <span>{analysis.ipInfo[hoveredIp].ip}</span>
+                {analysis.ipInfo[hoveredIp].country_code && (
+                     <img 
+                        src={`https://flagcdn.com/16x12/${analysis.ipInfo[hoveredIp].country_code!.toLowerCase()}.png`} 
+                        alt={analysis.ipInfo[hoveredIp].country}
+                        className="rounded-[1px]"
+                     />
+                )}
+            </div>
+            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+                <span className="text-gray-500">ISP:</span>
+                <span className="text-white truncate">{analysis.ipInfo[hoveredIp].as_name || 'Unknown'}</span>
+                
+                <span className="text-gray-500">ASN:</span>
+                <span className="text-cyber-accent">{analysis.ipInfo[hoveredIp].asn || 'N/A'}</span>
+                
+                <span className="text-gray-500">Loc:</span>
+                <span className="text-white">{analysis.ipInfo[hoveredIp].country}</span>
+                
+                <span className="text-gray-500">Region:</span>
+                <span className="text-gray-400">{analysis.ipInfo[hoveredIp].continent}</span>
+            </div>
+            {/* Arrow */}
+            <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-cyber-600"></div>
+        </div>
+      )}
     </div>
   );
 };
