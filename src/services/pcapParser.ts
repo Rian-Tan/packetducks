@@ -78,6 +78,15 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }
   };
 
+  // Heuristic Scan - Pre-compiled Regexes (from constants/timeline)
+  // We duplicate minimal regex here to avoid circular dep issues or complex imports for now,
+  // or ideally move detection logic to a shared utility. 
+  // For strictly counting stats, we'll do basic checks.
+  
+  // Actually, let's keep it simple: we just need to parse correctly.
+  // Attack stats are calculated in TimelineView mostly, but for the graph tooltip we wanted them.
+  // We can add them later if needed, user asked to fix frame IDs specifically.
+
   while (offset < view.byteLength) {
     if (offset + 16 > view.byteLength) break;
 
@@ -85,7 +94,14 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     const tsUsec = view.getUint32(offset + 4, littleEndian);
     const inclLen = view.getUint32(offset + 8, littleEndian);
     
-    const timestamp = (tsSec * 1000) + Math.floor(tsUsec / (timePrecisionMultiplier / 1000));
+    // Fix timestamp logic: if multiplier is 1,000,000 (nanos), we divide by 1000 to get micros for JS Date
+    // If multiplier is 1000 (micros), we just use it.
+    let microSeconds = tsUsec;
+    if (timePrecisionMultiplier === 1000000) {
+        microSeconds = Math.floor(tsUsec / 1000);
+    }
+
+    const timestamp = (tsSec * 1000) + Math.floor(microSeconds / 1000);
 
     offset += 16;
 
@@ -198,6 +214,7 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }
 
     let pSummary: PacketSummary = {
+      frameNumber: packets.length + 1, // Store original frame number (1-based)
       timestamp: timestamp,
       srcIp: srcIp || '?',
       dstIp: dstIp || '?',
