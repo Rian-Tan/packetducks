@@ -1,24 +1,33 @@
 # PacketDuck 🦆
 
+![](images/mainpage.png)
+
 PacketDuck is a modern, client-side **Network Packet Analyzer** and **Threat Intelligence Dashboard**. It parses PCAP files directly in the browser and leverages **Google Gemini AI** to provide forensic insights, risk scoring, and threat detection.
 
 ## 🚀 Features
 
 *   **Client-Side Processing**: Parses `.pcap` files entirely in the browser. Your raw packet data stays on your machine until you explicitly choose to analyze threats.
 *   **AI-Powered Threat Intel**: Uses Google's Gemini model to analyze traffic patterns, payload anomalies, and generate an executive security assessment.
+![]
 *   **Interactive Timeline**:
+    ![](images/timeline.gif)
     *   **Attack Detection**: Heuristics for SQL Injection, XSS, RCE, and Shellcode.
     *   **Behavioral Analysis**: Detects Traffic Bursts, Port Scans, and Lateral Movement (Pivoting).
     *   **Context Linking**: Visually links related events (e.g., a burst followed by a new connection).
 *   **Visualizations**:
     *   Protocol Distribution Charts.
+    ![](images/protocoldist.png)
     *   Active Conversations Table.
+    ![](images/activeconvs.png)
     *   Geo-IP Mapping for external hosts.
+    ![](images/iphostinfo.png)
 *   **Forensic Tools**:
     *   Payload inspection with ASCII preview.
+    ![](images/payloadinspection.png)
     *   VirusTotal integration for IP reputation checks.
+    ![](images/virustotalc2.png)
     *   PDF Report Generation.
-
+    
 ## 🛠️ Tech Stack
 
 *   **Frontend**: React 19, TypeScript, Vite
