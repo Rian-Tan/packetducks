@@ -6,7 +6,6 @@ export enum ProtocolType {
 }
 
 export interface PacketSummary {
-  frameNumber: number; // Original Wireshark Frame Number (1-based)
   timestamp: number;
   srcIp: string;
   dstIp: string;
@@ -25,17 +24,6 @@ export interface PortUsage {
   synack_src: number;
 }
 
-export interface IpInfoData {
-  ip: string;
-  asn?: string;
-  as_name?: string;
-  as_domain?: string;
-  country_code?: string;
-  country?: string;
-  continent_code?: string;
-  continent?: string;
-}
-
 export interface PcapAnalysisResult {
   totalPackets: number;
   protocolCounts: Record<string, number>;
@@ -44,19 +32,31 @@ export interface PcapAnalysisResult {
   startTime: Date;
   endTime: Date;
   rawSummary: PacketSummary[]; // Kept for AI context
-  ipInfo?: Record<string, IpInfoData>;
-  attackStats?: Record<string, number>;
+  hostGeoMap?: Record<string, { countryCode: string; countryName: string }>;
+  duplicatePayloads?: { payload: string; count: number; firstSeen: number; lastSeen: number }[];
 }
 
 export interface ThreatIntel {
   riskScore: number; // 0-100
   summary: string;
+  forensicJustification?: string; // AI's reasoning for the classification
+  classification?: string; // e.g. "PlugX", "Emotet", "Normal Traffic"
+  attackName?: string; // e.g. "React2Shell", "Log4Shell"
+  cveTags?: string[]; // e.g. ["CVE-2021-44228"]
+  manualIocs?: {
+    value: string;
+    type: 'IP' | 'PORT' | 'PATTERN';
+    description: string;
+    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  }[];
   iocs: {
     value: string;
     type: 'IP' | 'PORT' | 'PATTERN';
     description: string;
     severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-    virusTotalDetections?: string;
+    virusTotalDetections?: string; // Format "Malicious/Total" e.g. "14/95"
+    countryCode?: string; // ISO 3166-1 alpha-2 code
+    countryName?: string;
   }[];
   recommendations: string[];
 }

@@ -1,14 +1,6 @@
 import { PacketSummary, PcapAnalysisResult, PortUsage, ProtocolType } from '../types';
 import { COMMON_PORTS, TCP_FLAGS } from '../constants';
 
-const ATTACK_SIGS: Record<string, RegExp> = {
-  'SQL Injection': /('|"|%27|%22)\s*(or|and)\s+['"]?1['"]?=['"]?1|union\s+select|select\s+.*\s+from/i,
-  'XSS': /(<script\b[^>]*>|javascript:[^"'\s]+|on(error|load|click|mouseover|submit)\s*=|vbscript:|alert\()/i,
-  'Command Injection': /(cmd\.exe|\/bin\/sh|\/bin\/bash|whoami|cat\s+\/etc\/passwd|powershell)/i,
-  'Suspicious User-Agent': /User-Agent:\s*(sqlmap|nikto|nmap|curl|python-requests|gobuster|hydra)/i,
-  'Cleartext Auth': /(Authorization:\s*Basic|password=|user=|pass=)/i
-};
-
 // Helper to format IP addresses
 const formatIPv4 = (view: DataView, offset: number): string => {
   return `${view.getUint8(offset)}.${view.getUint8(offset + 1)}.${view.getUint8(offset + 2)}.${view.getUint8(offset + 3)}`;
@@ -23,7 +15,7 @@ const formatIPv6 = (view: DataView, offset: number): string => {
 };
 
 // Helper to extract printable ASCII from payload
-const getPayloadASCII = (view: DataView, start: number, end: number, maxLength: number = 200): string => {
+const getPayloadASCII = (view: DataView, start: number, end: number, maxLength: number = 1500): string => {
   if (start >= end) return '';
   const len = Math.min(end - start, maxLength);
   let str = '';
@@ -36,8 +28,6 @@ const getPayloadASCII = (view: DataView, start: number, end: number, maxLength: 
 };
 
 export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
-  // Fetch the C2 IP set first. This will be fast if cached.
-
   const arrayBuffer = await file.arrayBuffer();
   const view = new DataView(arrayBuffer);
 
@@ -46,10 +36,17 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     throw new Error("File is too short to be a valid PCAP.");
   }
 
-  const magicNumber = view.getUint32(0, true); 
+  const magicNumber = view.getUint32(0, true); // Read first 4 bytes as Little Endian for checking
   let littleEndian = true;
-  let timePrecisionMultiplier = 1000; 
+  let timePrecisionMultiplier = 1000; // Default to microseconds (1000000ns / 1000 = 1ms) -> Divider for ms conversion
 
+  /**
+   * Magic Number Logic:
+   * Standard PCAP Magic: 0xa1b2c3d4 (Microseconds)
+   *
+   * If we read it as LE and get 0xa1b2c3d4, the file IS Little Endian.
+   * If we read it as LE and get 0xd4c3b2a1, the file IS Big Endian (bytes are swapped).
+   */
   if (magicNumber === 0xa1b2c3d4) {
     littleEndian = true;
     timePrecisionMultiplier = 1000;
@@ -69,17 +66,20 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     littleEndian = true;
   }
 
+  // Link-Layer Header Type (Offset 20, 4 bytes)
+  // 1 = Ethernet, 113 = Linux SLL, 0 = Null/Loopback, 101 = Raw IP
   const linkType = view.getUint32(20, littleEndian);
   
-  let offset = 24;
+  // console.log(`PCAP Header: Endian=${littleEndian ? 'Little' : 'Big'}, LinkType=${linkType}`);
+
+  let offset = 24; // Skip global header
   const packets: PacketSummary[] = [];
   const uniqueHosts = new Set<string>();
   const connections = new Set<string>();
   const protocolCounts: Record<string, number> = {};
-  
-  const attackStats: Record<string, number> = {};
-  Object.keys(ATTACK_SIGS).forEach(k => attackStats[k] = 0);
+  const payloadCounts: Record<string, { count: number; firstSeen: number; lastSeen: number }> = {};
 
+  // Stats for "Significant Port" logic
   const tcpUsage: Record<number, PortUsage> = {};
   const udpUsage: Record<number, PortUsage> = {};
 
@@ -89,23 +89,23 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }
   };
 
+  // 2. Iterate Packets
   while (offset < view.byteLength) {
+    // Packet Header (16 bytes)
     if (offset + 16 > view.byteLength) break;
 
+    // Header: ts_sec (4), ts_usec (4), incl_len (4), orig_len (4)
     const tsSec = view.getUint32(offset, littleEndian);
     const tsUsec = view.getUint32(offset + 4, littleEndian);
     const inclLen = view.getUint32(offset + 8, littleEndian);
+    // const origLen = view.getUint32(offset + 12, littleEndian);
     
-    // Fix timestamp logic: if multiplier is 1,000,000 (nanos), we divide by 1000 to get micros for JS Date
-    // If multiplier is 1000 (micros), we just use it.
-    let microSeconds = tsUsec;
-    if (timePrecisionMultiplier === 1000000) {
-        microSeconds = Math.floor(tsUsec / 1000);
-    }
+    // Calculate timestamp in milliseconds
+    // tsSec is seconds since epoch. tsUsec is micro/nanoseconds.
+    // We want JS Date (milliseconds).
+    const timestamp = (tsSec * 1000) + Math.floor(tsUsec / (timePrecisionMultiplier / 1000));
 
-    const timestamp = (tsSec * 1000) + Math.floor(microSeconds / 1000);
-
-    offset += 16;
+    offset += 16; // Move past packet header
 
     if (offset + inclLen > view.byteLength) {
       console.warn("Packet length exceeds file size, stopping parse.");
@@ -115,19 +115,23 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     const packetStart = offset;
     const packetEnd = offset + inclLen;
 
+    // --- Parse Layers ---
     let l3Offset = 0;
-    let l3Type = 0;
+    let l3Type = 0; // EtherType or equivalent
     let hasL3 = false;
     let handled = false;
 
-    if (linkType === 1) { // Ethernet
+    // Layer 2: Link Layer
+    if (linkType === 1) { 
+      // Ethernet
       if (inclLen >= 14) {
-        let etype = view.getUint16(packetStart + 12, false);
+        let etype = view.getUint16(packetStart + 12, false); // Ethernet is always Network Byte Order (Big Endian)
         let headerLen = 14;
 
+        // Handle 802.1Q VLAN
         if (etype === 0x8100 && inclLen >= 18) {
           etype = view.getUint16(packetStart + 16, false);
-          headerLen = 18;
+          headerLen = 18; // 14 + 4 bytes VLAN tag
         }
         
         l3Type = etype;
@@ -136,7 +140,9 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
         handled = true;
         protocolCounts['Ethernet'] = (protocolCounts['Ethernet'] || 0) + 1;
       }
-    } else if (linkType === 113) { // Linux SLL
+    } else if (linkType === 113) { 
+      // Linux SLL (Cooked Capture)
+      // Header is 16 bytes. Protocol is at offset 14 (Network Byte Order).
       if (inclLen >= 16) {
         l3Type = view.getUint16(packetStart + 14, false);
         l3Offset = packetStart + 16;
@@ -144,20 +150,25 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
         handled = true;
         protocolCounts['Linux SLL'] = (protocolCounts['Linux SLL'] || 0) + 1;
       }
-    } else if (linkType === 0) { // Null/Loopback
+    } else if (linkType === 0) {
+      // Null / Loopback
+      // 4 byte header. Contains protocol family in host byte order.
+      // However, it's safer to just peek at the IP version in the payload.
       if (inclLen >= 4) {
         l3Offset = packetStart + 4;
+        // Peek IP version
         const firstByte = view.getUint8(l3Offset);
         const version = (firstByte >> 4) & 0xF;
         if (version === 4) l3Type = 0x0800;
         else if (version === 6) l3Type = 0x86DD;
-        else l3Type = 0;
+        else l3Type = 0; // Unknown
 
         hasL3 = true;
         handled = true;
         protocolCounts['Loopback'] = (protocolCounts['Loopback'] || 0) + 1;
       }
-    } else if (linkType === 101 || linkType === 12) { // Raw IP
+    } else if (linkType === 101 || linkType === 12) {
+       // Raw IP
        l3Offset = packetStart;
        const firstByte = view.getUint8(l3Offset);
        const version = (firstByte >> 4) & 0xF;
@@ -173,15 +184,17 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
        protocolCounts[`Unknown L2 (Type ${linkType})`] = (protocolCounts[`Unknown L2 (Type ${linkType})`] || 0) + 1;
     }
 
+    // Layer 3: Network Layer
     let srcIp = '';
     let dstIp = '';
-    let nextProto = 0;
+    let nextProto = 0; // TCP(6), UDP(17)
     let l4Offset = 0;
     let isIp = false;
 
     if (hasL3 && l3Offset < packetEnd) {
       if (l3Type === 0x0800) { // IPv4
         if (l3Offset + 20 <= packetEnd) {
+          // Version & IHL
           const verIhl = view.getUint8(l3Offset);
           const ihl = (verIhl & 0x0f) * 4;
           
@@ -195,10 +208,11 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
         }
       } else if (l3Type === 0x86DD) { // IPv6
         if (l3Offset + 40 <= packetEnd) {
-          nextProto = view.getUint8(l3Offset + 6);
+          nextProto = view.getUint8(l3Offset + 6); // Next Header
           srcIp = formatIPv6(view, l3Offset + 8);
           dstIp = formatIPv6(view, l3Offset + 24);
           
+          // Simplified: We assume next header is L4. Real IPv6 has extension headers.
           l4Offset = l3Offset + 40;
           isIp = true;
           protocolCounts['IPv6'] = (protocolCounts['IPv6'] || 0) + 1;
@@ -215,8 +229,8 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
       connections.add(connKey);
     }
 
+    // Layer 4: Transport Layer
     let pSummary: PacketSummary = {
-      frameNumber: packets.length + 1, // Store original frame number (1-based)
       timestamp: timestamp,
       srcIp: srcIp || '?',
       dstIp: dstIp || '?',
@@ -230,11 +244,12 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           pSummary.protocol = ProtocolType.TCP;
           protocolCounts['TCP'] = (protocolCounts['TCP'] || 0) + 1;
 
-          const srcPort = view.getUint16(l4Offset, false);
+          const srcPort = view.getUint16(l4Offset, false); // Ports are Big Endian
           const dstPort = view.getUint16(l4Offset + 2, false);
           
+          // TCP Data Offset (Header Length)
           const dataOffsetByte = view.getUint8(l4Offset + 12);
-          const dataOffset = (dataOffsetByte >> 4) * 4;
+          const dataOffset = (dataOffsetByte >> 4) * 4; 
 
           const flags = view.getUint8(l4Offset + 13);
 
@@ -242,29 +257,40 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           pSummary.dstPort = dstPort;
           pSummary.flags = flags;
 
+          // Payload Extraction
           const payloadStart = l4Offset + dataOffset;
           if (payloadStart < packetEnd) {
-            pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
-            // Check for attacks
-            Object.entries(ATTACK_SIGS).forEach(([name, regex]) => {
-              if (regex.test(pSummary.payload!)) {
-                attackStats[name]++;
+            const payload = getPayloadASCII(view, payloadStart, packetEnd);
+            pSummary.payload = payload;
+            
+            // Track duplicates for replay detection
+            if (payload.length > 10) { // Only track meaningful payloads
+              if (!payloadCounts[payload]) {
+                payloadCounts[payload] = { count: 1, firstSeen: timestamp, lastSeen: timestamp };
+              } else {
+                payloadCounts[payload].count++;
+                payloadCounts[payload].lastSeen = timestamp;
               }
-            });
+            }
           }
 
+          // Stats tracking
           initUsage(tcpUsage, srcPort);
           initUsage(tcpUsage, dstPort);
           tcpUsage[srcPort].sport++;
           tcpUsage[dstPort].dport++;
 
+          // Syn tracking
+          // SYN set (0x02) AND ACK not set (0x10)
           if ((flags & TCP_FLAGS.SYN) && !(flags & TCP_FLAGS.ACK)) {
             tcpUsage[dstPort].syn_dst++;
           }
+          // SYN set AND ACK set
           if ((flags & TCP_FLAGS.SYN) && (flags & TCP_FLAGS.ACK)) {
             tcpUsage[srcPort].synack_src++;
           }
 
+          // Service ID
           if (COMMON_PORTS[dstPort]) {
             const label = `TCP/${COMMON_PORTS[dstPort]}`;
             protocolCounts[label] = (protocolCounts[label] || 0) + 1;
@@ -281,15 +307,21 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
           pSummary.srcPort = srcPort;
           pSummary.dstPort = dstPort;
 
+          // Payload Extraction (UDP header is 8 bytes)
           const payloadStart = l4Offset + 8;
           if (payloadStart < packetEnd) {
-            pSummary.payload = getPayloadASCII(view, payloadStart, packetEnd);
-            // Check for attacks
-            Object.entries(ATTACK_SIGS).forEach(([name, regex]) => {
-              if (regex.test(pSummary.payload!)) {
-                attackStats[name]++;
+            const payload = getPayloadASCII(view, payloadStart, packetEnd);
+            pSummary.payload = payload;
+
+            // Track duplicates for replay detection
+            if (payload.length > 10) {
+              if (!payloadCounts[payload]) {
+                payloadCounts[payload] = { count: 1, firstSeen: timestamp, lastSeen: timestamp };
+              } else {
+                payloadCounts[payload].count++;
+                payloadCounts[payload].lastSeen = timestamp;
               }
-            });
+            }
           }
 
           initUsage(udpUsage, srcPort);
@@ -310,9 +342,11 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
 
     packets.push(pSummary);
     
+    // Prepare for next packet
     offset = packetEnd;
   }
 
+  // 3. Post-Processing: Significant Numeric Ports (Logic ported from Python)
   const significantTcp = new Set<number>();
   Object.entries(tcpUsage).forEach(([portStr, stats]) => {
     const port = parseInt(portStr);
@@ -322,6 +356,7 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     const s = stats.sport;
     const synHits = stats.syn_dst + stats.synack_src;
 
+    // Python: min_dport=5, min_syn=1, dominance_ratio=1.5
     if (d >= 5 && synHits >= 1 && d > s * 1.5) {
       significantTcp.add(port);
     }
@@ -334,11 +369,13 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
 
     const d = stats.dport;
     const s = stats.sport;
+    // Python: min_dport=5, dominance_ratio=1.5
     if (d >= 5 && d > s * 1.5) {
       significantUdp.add(port);
     }
   });
 
+  // Second pass count for significant numeric ports
   packets.forEach(p => {
     if (p.protocol === ProtocolType.TCP && p.dstPort) {
       if (significantTcp.has(p.dstPort)) {
@@ -354,10 +391,20 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     }
   });
 
+  // Sort packets by timestamp just in case
   packets.sort((a, b) => a.timestamp - b.timestamp);
 
   const startTime = packets.length > 0 ? new Date(packets[0].timestamp) : new Date();
   const endTime = packets.length > 0 ? new Date(packets[packets.length - 1].timestamp) : new Date();
+
+  const duplicatePayloads = Object.entries(payloadCounts)
+    .filter(([, stats]) => stats.count > 1)
+    .map(([payload, stats]) => ({
+      payload,
+      ...stats
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20); // Top 20 duplicates
 
   return {
     totalPackets: packets.length,
@@ -370,6 +417,6 @@ export const parsePcap = async (file: File): Promise<PcapAnalysisResult> => {
     startTime,
     endTime,
     rawSummary: packets,
-    attackStats
+    duplicatePayloads
   };
 };

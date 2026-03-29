@@ -4,18 +4,27 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "tsx server.ts",
+    "start": "node server.ts",
+    "lint": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "@google/genai": "^1.31.0",
+    "better-sqlite3": "^12.8.0",
+    "body-parser": "^2.2.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "html2canvas": "^1.4.1",
+    "http-proxy-middleware": "^3.0.5",
     "jspdf": "^3.0.4",
     "lucide-react": "^0.556.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "recharts": "^3.5.1"
+    "recharts": "^3.5.1",
+    "sqlite3": "^6.0.1",
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

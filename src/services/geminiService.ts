@@ -1,8 +1,8 @@
 import { GoogleGenAI, Type, Schema } from '@google/genai';
-import { PcapAnalysisResult, ThreatIntel, IpInfoData, PacketSummary } from '../types';
+import { PcapAnalysisResult, ThreatIntel } from '../types';
 
 const getClient = () => {
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("API Key not found");
   }
@@ -10,42 +10,7 @@ const getClient = () => {
 };
 
 const getVtKey = () => {
-  return process.env.VT_API_KEY || "3623edc99f6e538b7b5af487a52027c3f11c15833af26c7f5620412fce7ae6ae";
-};
-
-const IPINFO_TOKEN = '04016f0e1f1a5b';
-
-const isPrivateIp = (ip: string): boolean => {
-  const parts = ip.split('.').map(n => parseInt(n, 10));
-  if (parts.length === 4) {
-    if (parts[0] === 10) return true;
-    if (parts[0] === 192 && parts[1] === 168) return true;
-    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-    if (parts[0] === 127) return true;
-    if (parts[0] === 0) return true;
-    if (parts[0] >= 224 && parts[0] <= 239) return true;
-    if (parts[0] === 169 && parts[1] === 254) return true; // Link-local
-  }
-  if (ip === '::1') return true;
-  if (ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
-  return false;
-};
-
-export const enrichIpInfo = async (ips: string[]): Promise<Record<string, IpInfoData>> => {
-  const publicIps = ips.filter(ip => !isPrivateIp(ip));
-  const targets = publicIps.slice(0, 25); // Limit to 25 to respect potential rate limits/performance
-  const results: Record<string, IpInfoData> = {};
-  
-  await Promise.all(targets.map(async (ip) => {
-      try {
-          const res = await fetch(`https://api.ipinfo.io/lite/${ip}?token=${IPINFO_TOKEN}`);
-          if(res.ok) {
-              const data = await res.json();
-              results[ip] = data;
-          }
-      } catch(e) { console.error(`Failed to fetch IP info for ${ip}`, e); }
-  }));
-  return results;
+  return process.env.VT_API_KEY || "";
 };
 
 export const checkSingleVirusTotal = async (ip: string): Promise<string> => {
@@ -54,11 +19,10 @@ export const checkSingleVirusTotal = async (ip: string): Promise<string> => {
     throw new Error("VirusTotal API Key not configured");
   }
 
-  // Use public CORS proxy to ensure it works in all environments (Dev/Preview/Prod) without server config
-  const targetUrl = `https://www.virustotal.com/api/v3/ip_addresses/${ip}`;
-  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+  // Use local proxy to handle CORS and hide API key if needed
+  const targetUrl = `/vt-api/ip_addresses/${ip}`;
   
-  const response = await fetch(proxyUrl, {
+  const response = await fetch(targetUrl, {
       headers: { 'x-apikey': apiKey }
   });
 
@@ -103,100 +67,189 @@ const enrichIocsWithVirusTotal = async (iocs: ThreatIntel['iocs']): Promise<Thre
   });
 };
 
-// Helper to encode string to Base64 safely for large payloads
-const base64Encode = (str: string): string => {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  const len = bytes.byteLength;
-  const chunkSize = 0x8000; // 32KB chunks to avoid stack overflow
-  for (let i = 0; i < len; i += chunkSize) {
-    // @ts-ignore
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
+const enrichIocsWithGeoIp = async (iocs: ThreatIntel['iocs']): Promise<ThreatIntel['iocs']> => {
+    const ipIocs = iocs.filter(ioc => ioc.type && ioc.type.toUpperCase() === 'IP');
+    if (ipIocs.length === 0) return iocs;
+
+    // Helper to check if IP is private
+    const isPrivateIp = (ip: string) => {
+        const parts = ip.split('.').map(Number);
+        if (parts[0] === 10) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 127) return true;
+        return false;
+    };
+
+    const geoResults = new Map<string, { countryCode: string, country: string }>();
+
+    // Fetch GeoIP for public IPs only
+    await Promise.all(ipIocs.map(async (ioc) => {
+        if (isPrivateIp(ioc.value)) return;
+        try {
+            const res = await fetch(`https://ipapi.co/${ioc.value}/json/`);
+            if (res.ok) {
+                const data = await res.json();
+                if (!data.error) {
+                    geoResults.set(ioc.value, { countryCode: data.country_code, country: data.country_name });
+                }
+            }
+        } catch (e) {
+            console.warn(`GeoIP lookup error for ${ioc.value}`, e);
+        }
+    }));
+
+    return iocs.map(ioc => {
+        if (ioc.type && ioc.type.toUpperCase() === 'IP' && geoResults.has(ioc.value)) {
+            const geo = geoResults.get(ioc.value)!;
+            return { ...ioc, countryCode: geo.countryCode, countryName: geo.country };
+        }
+        return ioc;
+    });
 };
 
-// Convert packets to CSV format for the model to process as a file
-const packetsToCsv = (packets: PacketSummary[]): string => {
-  // Header
-  let csv = 'Frame,Timestamp,SrcIP,SrcPort,DstIP,DstPort,Protocol,Length,Info,PayloadSnippet\n';
-  
-  packets.forEach(p => {
-    // Escape payload for CSV (replace quotes and newlines)
-    const payloadSafe = p.payload 
-      ? `"${p.payload.replace(/"/g, '""').replace(/\n/g, ' ').substring(0, 300)}"` 
-      : '""';
-    
-    // Construct Info string
-    let info = "";
-    if (p.flags) {
-      const flags = [];
-      if (p.flags & 0x02) flags.push('SYN');
-      if (p.flags & 0x10) flags.push('ACK');
-      if (p.flags & 0x01) flags.push('FIN');
-      if (p.flags & 0x04) flags.push('RST');
-      if (p.flags & 0x08) flags.push('PSH');
-      info = flags.join(' ');
-    }
-    
-    csv += `${p.frameNumber},${p.timestamp},${p.srcIp},${p.srcPort || ''},${p.dstIp},${p.dstPort || ''},${p.protocol},${p.length},"${info}",${payloadSafe}\n`;
+export const enrichHostsWithGeoIp = async (analysis: PcapAnalysisResult): Promise<PcapAnalysisResult> => {
+  const publicIps = analysis.uniqueHosts.filter(ip => {
+    if (ip.includes(':')) return false; // Skip IPv6 for now
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4) return false;
+    // Skip private ranges
+    if (parts[0] === 10) return false;
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+    if (parts[0] === 192 && parts[1] === 168) return false;
+    if (parts[0] === 127) return false;
+    if (parts[0] >= 224) return false;
+    return true;
   });
+
+  if (publicIps.length === 0) return analysis;
+
+  const geoMap: Record<string, { countryCode: string; countryName: string }> = {};
   
-  return csv;
+  // Process in batches of 5 to avoid rate limits
+  for (let i = 0; i < publicIps.length; i += 5) {
+    const batch = publicIps.slice(i, i + 5);
+    await Promise.all(batch.map(async (ip) => {
+      try {
+        const response = await fetch(`https://ipapi.co/${ip}/json/`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.country_code) {
+            geoMap[ip] = {
+              countryCode: data.country_code,
+              countryName: data.country_name
+            };
+          }
+        }
+      } catch (err) {
+        console.error(`GeoIP lookup failed for host ${ip}:`, err);
+      }
+    }));
+    if (i + 5 < publicIps.length) {
+      await new Promise(resolve => setTimeout(resolve, 500)); // Small delay between batches
+    }
+  }
+
+  return {
+    ...analysis,
+    hostGeoMap: geoMap
+  };
 };
 
 export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<ThreatIntel> => {
   const ai = getClient();
   
-  // 1. Contextual Data (Top Stats)
+  // Prepare a concise summary for the LLM to avoid token limits
   const topProtocols = Object.entries(data.protocolCounts)
     .sort(([,a], [,b]) => b - a)
     .slice(0, 15);
 
-  const ipContext = data.ipInfo 
-      ? JSON.stringify(Object.values(data.ipInfo).map(({ ip, as_name, country, asn }) => ({ ip, org: as_name, country, asn })))
-      : "No external IP context available.";
-  
-  const attackStats = data.attackStats ? JSON.stringify(data.attackStats) : "No pre-calculated attack stats.";
+  const connectionSample = data.connections.slice(0, 30);
+  const hostsSample = data.uniqueHosts.slice(0, 50);
 
-  // 2. Prepare the Dataset "File" (CSV)
-  // We include a large sample, much larger than the previous plaintext limit.
-  // 1.5 Flash has a large context window (1M tokens), but huge PCAPs can exceed it.
-  // We cap at 4,000 packets to ensure we stay under the limit (assuming ~250 tokens per line).
-  const datasetSlice = data.rawSummary.slice(0, 4000);
-  const csvData = packetsToCsv(datasetSlice);
-  const base64Csv = base64Encode(csvData);
+  // Filter for packets that have payload data
+  const allPacketsWithPayload = data.rawSummary.filter(p => p.payload && p.payload.length > 4);
+
+  // Prioritize suspicious packets
+  const suspiciousKeywords = [
+    'jndi', 'ldap', 'rmi', 'dns:', 'protocol', 'constructor', '__proto__', 
+    '${', '%24%7B', 'nc ', 'bash', 'sh ', 'cmd.exe', 'powershell', 'whoami', 'curl', 'wget',
+    'union select', 'select ', 'insert ', 'drop ', 'delete ', 'update ', 'script>',
+    '../', '..\\', '/etc/passwd', 'C:\\Windows', 'Authorization:', 'Basic ', 'Bearer ',
+    'log4j', 'log4shell', 'exploit', 'payload', 'lower:', 'upper:', 'sys:', 'env:', 'main:',
+    'jndi:', 'ldap:', 'rmi:', 'dns:'
+  ];
+
+  const suspiciousPackets = allPacketsWithPayload.filter(p => {
+    const payloadLower = p.payload!.toLowerCase();
+    return suspiciousKeywords.some(keyword => payloadLower.includes(keyword.toLowerCase()));
+  });
+
+  const normalPackets = allPacketsWithPayload.filter(p => !suspiciousPackets.includes(p));
+
+  // Combine: All suspicious (up to 150) + some normal to provide context (up to 50)
+  const packetsToAnalyze = [
+    ...suspiciousPackets.slice(0, 150),
+    ...normalPackets.slice(0, 50)
+  ].slice(0, 200); // Absolute max 200 packets
+
+  const packetPayloadSample = packetsToAnalyze.map(p => ({
+    src: p.srcIp,
+    dst: p.dstIp,
+    proto: p.protocol,
+    dstPort: p.dstPort,
+    payloadSnippet: p.payload
+  }));
 
   const prompt = `
-    Analyze the attached Network Traffic Log (CSV file) derived from a PCAP capture.
+    Analyze the following network traffic summary derived from a PCAP file.
     Act as a senior Incident Response (IR) analyst conducting post-mortem forensic analysis.
     
-    Contextual Intelligence:
+    Traffic Stats:
+    - Total Packets: ${data.totalPackets}
     - Top Protocols: ${JSON.stringify(topProtocols)}
-    - Detected Attack Signatures (Heuristic Scan): ${attackStats}
-    - External IP Intelligence (Geo/ASN): ${ipContext}
+    - Unique Hosts Sample: ${JSON.stringify(hostsSample)}
+    - Connections Sample: ${JSON.stringify(connectionSample)}
+    - Duplicate Payloads (Potential Replay Attacks): ${JSON.stringify(data.duplicatePayloads || [])}
     
-    Your objective is to assess the security posture of this capture based on the attached CSV log.
+    Packet Payloads (Sample):
+    ${JSON.stringify(packetPayloadSample)}
+    
+    Your objective is to assess the security posture of this capture.
 
     CRITICAL DETECTION GUIDELINES:
-    1. **EVIDENCE-BASED DETECTION**: You must strictly analyze the attached CSV data. 
-    2. **LOOK FOR SPECIFIC PATTERNS IN PAYLOADS**:
-       - **Web Attacks**: SQL Injection ('UNION SELECT', 'OR 1=1'), XSS ('<script>'), Path Traversal.
-       - **Command Injection**: 'cmd.exe', '/bin/sh', 'whoami', 'powershell'.
-       - **Suspicious User-Agents**: 'sqlmap', 'nikto', 'curl', 'python-requests', 'hydra'.
-       - **Cleartext Auth**: 'Authorization: Basic', 'password=', 'user='.
-       - **Geo-Location Anomalies**: Cross-reference IPs in the CSV with the provided IP Intelligence.
-    3. **SCORING RUBRIC**:
+    1. **EVIDENCE-BASED DETECTION**: You must strictly analyze the "Packet Payloads" provided. Do not hallucinate threats that are not in the data.
+    2. **THREAT KNOWLEDGE BASE**:
+       - **React2Shell (CVE-2025-55182)**: Look for HTTP requests targeting development servers (often port 3000/8080) with payloads containing shell commands (e.g., 'nc', 'bash', 'sh') or suspicious parameters like 'url=' in a debugging context. It is a Remote Code Execution (RCE) attack, NOT prototype pollution.
+       - **Prototype Pollution**: Look for JSON payloads with "__proto__", "constructor", or "prototype" keys being assigned malicious values. This is an object manipulation attack.
+       - **Log4Shell (CVE-2021-44228)**: Look for JNDI lookups like '\${jndi:ldap://...}', '\${jndi:rmi://...}', or obfuscated versions like '\${\${lower:j}ndi:ldap://...}'. These can appear in HTTP headers (User-Agent, Referer, X-Api-Version) or POST bodies.
+       - **EternalBlue (CVE-2017-0144)**: Look for SMBv1 traffic with suspicious tree connect or session setup requests, often targeting port 445.
+       - **Heartbleed (CVE-2014-0160)**: Look for TLS Heartbeat requests with a payload length that exceeds the actual data provided, leading to memory leakage.
+       - **Shellshock (CVE-2014-6271)**: Look for '() { :; };' patterns in HTTP headers like User-Agent or Referer.
+       - **SQL Injection**: Look for 'UNION SELECT', 'OR 1=1', '--', or sleep functions.
+       - **Path Traversal**: Look for '../..', '/etc/passwd', or 'C:\Windows\System32'.
+       - **Replay Attack**: Look for identical payloads (especially those containing authentication tokens, cookies, or sensitive commands) sent multiple times, potentially from different IPs or at different times. Check the "Duplicate Payloads" section for evidence.
+    3. **LOOK FOR SPECIFIC PATTERNS**:
+       - **Command Injection**: 'cmd.exe', '/bin/sh', 'whoami', 'powershell', 'nc -e', 'bash -i'.
+       - **Suspicious User-Agents**: 'sqlmap', 'nikto', 'curl', 'python-requests', 'hydra', 'zgrab'.
+       - **Cleartext Auth**: 'Authorization: Basic', 'password=', 'user=', 'cookie: session='.
+    3. **CONTEXTUAL ANALYSIS**: If you see standard protocols (HTTP, DNS) behaving normally, mark them as safe. However, if you see binary data in DNS TXT records (Tunneling) or non-HTTP traffic on port 80, flag it.
+    4. **SCORING RUBRIC**:
        - **0-10 (Clean)**: Standard traffic, no anomalies.
-       - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols, or generic scanning noise.
+       - **11-40 (Low/Suspicious)**: Cleartext credentials, deprecated protocols (Telnet), or generic scanning noise.
        - **41-75 (High)**: Strong indicators of attack (SQLi patterns, XSS attempts, known malicious User-Agents).
-       - **76-100 (Critical)**: Confirmed compromise (Shell responses, successful data exfiltration, C2 beaconing).
+       - **76-100 (Critical)**: Confirmed compromise indicators (Shell responses, successful data exfiltration signatures).
 
-    If the "Detected Attack Signatures" count is high (>0), your Risk Score MUST reflect this (High/Critical), as these are hard regex matches found in the file.
-    
     If the capture appears clean, explicitly state "No significant threats detected in the provided sample."
 
-    Return a structured JSON assessment.
+    **FINAL WARNING**: Do not confuse Remote Code Execution (RCE) patterns (like shell commands or environment variable injection) with Prototype Pollution. Prototype Pollution specifically involves the modification of JavaScript object prototypes (e.g., __proto__). If you see shell commands, it is almost certainly an RCE or Command Injection attack.
+
+    Return a structured JSON assessment. 
+    - Include a 'forensicJustification' field where you explain the step-by-step reasoning for your classification. This should include specific references to the packet payloads you analyzed.
+    - Include a 'classification' field that identifies the traffic type or malware family (e.g. "PlugX", "Emotet", "SQL Injection Attack", "Normal HTTP Traffic").
+    - **CRITICAL**: If you can identify a specific attack name (e.g. "React2Shell", "Log4Shell", "EternalBlue", "WannaCry") or any associated CVE IDs (e.g. "CVE-2021-44228", "CVE-2017-0144"), you MUST include them in the 'attackName' and 'cveTags' fields respectively. 
+    - If multiple CVEs are involved, list them all in 'cveTags'.
+    - If no specific attack name is found, use the most descriptive classification as the 'attackName'.
   `;
 
   const schema: Schema = {
@@ -204,6 +257,14 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     properties: {
       riskScore: { type: Type.INTEGER, description: "Risk score from 0 (safe) to 100 (critical)." },
       summary: { type: Type.STRING, description: "Executive summary of findings." },
+      forensicJustification: { type: Type.STRING, description: "Step-by-step reasoning for the classification, referencing specific packet payloads." },
+      classification: { type: Type.STRING, description: "Malware family or traffic classification (e.g. 'PlugX', 'Normal Traffic')." },
+      attackName: { type: Type.STRING, description: "Specific attack name if identified (e.g. 'React2Shell')." },
+      cveTags: { 
+        type: Type.ARRAY, 
+        items: { type: Type.STRING },
+        description: "List of associated CVE IDs (e.g. ['CVE-2021-44228'])." 
+      },
       iocs: {
         type: Type.ARRAY,
         items: {
@@ -221,30 +282,17 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
         items: { type: Type.STRING }
       }
     },
-    required: ["riskScore", "summary", "iocs", "recommendations"]
+    required: ["riskScore", "summary", "classification", "iocs", "recommendations"]
   };
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: prompt },
-            { 
-              inlineData: { 
-                mimeType: 'text/csv', 
-                data: base64Csv 
-              } 
-            }
-          ]
-        }
-      ],
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.1, // Strict/Deterministic
+        temperature: 0.2, // Slightly increased to allow pattern matching flexibility without hallucination
       }
     });
 
@@ -253,21 +301,23 @@ export const generateThreatIntel = async (data: PcapAnalysisResult): Promise<Thr
     
     const intel = JSON.parse(text) as ThreatIntel;
 
-    // Enrich with VirusTotal Data (API)
+    // Step 2: Enrich with VirusTotal Data (API)
+    // We do this server-side or via proxy to avoid CORS
     if (intel.iocs && intel.iocs.length > 0) {
       intel.iocs = await enrichIocsWithVirusTotal(intel.iocs);
+      intel.iocs = await enrichIocsWithGeoIp(intel.iocs);
     }
 
     return intel;
 
   } catch (error) {
     console.error("Gemini Analysis Failed:", error);
-    // Fallback
+    // Fallback if AI fails or key missing
     return {
       riskScore: 0,
-      summary: "AI Analysis unavailable. The file may be too large or the API Key is invalid.",
+      summary: "AI Analysis unavailable. Check API Key or network connection.",
       iocs: [],
-      recommendations: ["Manually review cleartext protocols.", "Check API quotas."]
+      recommendations: ["Manually review cleartext protocols."]
     };
   }
 };
